@@ -1,14 +1,15 @@
 {
   "name": "gamesphere-tg",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
     "start": "node server.js",
-    "clean": "rm -rf dist server.js",
+    "bot": "node -e \"import('./bot.js').then(m=>m.startBot())\"",
+    "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
     "heroku-postbuild": "npm run build"
   },
@@ -29,6 +30,7 @@
     "react": "^19.0.1",
     "react-chessboard": "^5.10.0",
     "react-dom": "^19.0.1",
+    "telegraf": "^4.16.3",
     "vite": "^6.2.3"
   },
   "devDependencies": {
