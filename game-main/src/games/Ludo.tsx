@@ -215,6 +215,8 @@ export default function Ludo({ onGameOver, onBack }: LudoProps) {
   };
 
   const handleRollComplete = (r: number) => {
+    // Online: only the player whose turn it is should process dice roll
+    if (mode === 'online_playing' && role !== turn) return;
     setDiceRoll(r);
     syncState({ diceRoll: r });
 
@@ -405,9 +407,10 @@ export default function Ludo({ onGameOver, onBack }: LudoProps) {
   if (mode === 'online_lobby') {
     return <MultiplayerLobby gameName="Ludo Plus" gameId="ludo" maxPlayers={4} onStartGame={(r, id) => { 
       // r is 'p1' or 'p2'. Let's map 'p1' -> red, 'p2' -> yellow.
-      setRole(r === 'p1' ? 'red' : 'yellow'); 
-      setRoomId(id); 
-      setMode('online_playing'); 
+      const colorMap: Record<string,string> = { p1:'red', p2:'yellow', p3:'blue', p4:'green' };
+      setRole(colorMap[r] ?? 'red');
+      setRoomId(id);
+      setMode('online_playing');
       initGame('online_playing');
     }} onBack={() => setMode('menu')} />;
   }
@@ -558,7 +561,7 @@ export default function Ludo({ onGameOver, onBack }: LudoProps) {
          )}
          
          <p className="mt-6 text-gray-400 font-bold uppercase tracking-widest text-sm bg-[#1c2836] px-6 py-2 rounded-full border border-gray-700">
-           {message || (isCurrentPlayerBot ? "Machine is playing" : diceRoll !== null ? "Tap your piece to move" : movingLogic ? "Moving..." : "Tap dice to roll")}
+           {message || (isCurrentPlayerBot ? "Machine is playing" : diceRoll !== null ? "Tap your piece to move" : movingLogic ? "Moving..." : (mode === 'online_playing' && role !== turn) ? `${turn.toUpperCase()} ka turn hai...` : "Tap dice to roll")}
          </p>
       </div>
     </div>
