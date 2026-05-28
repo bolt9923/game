@@ -4,9 +4,9 @@ import {
   ArrowLeft, Users, Copy, Check, Play, Wifi, Plus, KeyRound, Loader2,
   Crown, LogOut, AlertCircle,
 } from 'lucide-react';
-import { rooms, type RoomRow, type RoomPlayer } from '@/lib/rooms';
-import { mockBackend } from '@/lib/mockBackend';
-import { GAMES } from '@/data';
+import { rooms, type RoomRow, type RoomPlayer } from '../lib/rooms';
+import { mockBackend } from '../lib/mockBackend';
+import { GAMES } from '../data';
 
 interface Props {
   me: RoomPlayer;
