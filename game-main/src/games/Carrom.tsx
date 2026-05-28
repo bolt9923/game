@@ -1183,6 +1183,8 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     if (mode !== 'online_playing' || !roomId) return;
     const unsub = mockBackend.subscribe(('carrom_sync_' + roomId) as any, (data: any) => {
       if (data.type === 'strike') {
+        // Only apply incoming strike if it was sent by the opponent (not ourselves)
+        if (data.shooter && data.shooter === roleRef.current) return; // ignore our own echo
         if (turnRef.current !== roleRef.current && strikerRef.current && canShootRef.current) {
           canShootRef.current = false; isMovingRef.current = true;
           Matter.Body.setPosition(strikerRef.current, data.position);
@@ -1222,7 +1224,10 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   function onPointerDown(e: React.PointerEvent) {
     if (!canShootRef.current || isMovingRef.current) return;
     if (modeRef.current === 'bot' && turnRef.current === 'p2') return;
-    if (modeRef.current === 'online_playing' && roleRef.current !== turnRef.current) return;
+    if (modeRef.current === 'online_playing' && roleRef.current !== turnRef.current) {
+      console.log('[Carrom] Not your turn:', roleRef.current, '!==', turnRef.current);
+      return;
+    }
     if (disqualifiedRef.current.has(turnRef.current)) return;
     if (!strikerRef.current) return;
 
@@ -1321,6 +1326,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     if (modeRef.current === 'online_playing' && roomIdRef.current) {
       mockBackend.publish(('carrom_sync_' + roomIdRef.current) as any, {
         type: 'strike', force: { x: fx, y: fy }, position: strikerRef.current.position,
+        shooter: roleRef.current,
       });
     }
   }
