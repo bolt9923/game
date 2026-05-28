@@ -1,0 +1,6 @@
+{
+  "name": "GameSphere TG",
+  "description": "A Telegram Mini App platform for playing multiple games with friends, global leaderboards, daily bonuses, and user profiles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
