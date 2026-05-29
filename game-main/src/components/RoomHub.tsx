@@ -1,353 +1,414 @@
-import { Telegraf } from 'telegraf';
-import { initializeApp, getApps } from 'firebase/app';
-import { getDatabase, ref, onValue, off, get } from 'firebase/database';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { motion } from 'motion/react';
+import {
+  ArrowLeft, Users, Copy, Check, Play, Wifi, Plus, KeyRound, Loader2,
+  Crown, LogOut, AlertCircle, Send,
+} from 'lucide-react';
+import { rooms, type RoomRow, type RoomPlayer } from '../lib/rooms';
+import { mockBackend } from '../lib/mockBackend';
+import { GAMES } from '../data';
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const WEBAPP_URL = process.env.WEBAPP_URL || process.env.APP_URL;
+interface Props {
+  me: RoomPlayer;
+  onLaunch: (room: RoomRow, myRole: 'p1' | 'p2' | 'p3' | 'p4') => void;
+  onBack: () => void;
+  // ✅ Telegram se aaya room code — seedha join karo
+  autoJoinCode?: string;
+  // ✅ Group chat ID — room banane ke baad group mein message bhejo
+  groupChatId?: string;
+}
 
-// ── Firebase init ─────────────────────────────────────────────────────────────
-function getDb() {
-  const config = {
-    apiKey:            process.env.VITE_FIREBASE_API_KEY,
-    authDomain:        process.env.VITE_FIREBASE_AUTH_DOMAIN,
-    databaseURL:       process.env.VITE_FIREBASE_DATABASE_URL,
-    projectId:         process.env.VITE_FIREBASE_PROJECT_ID,
-    storageBucket:     process.env.VITE_FIREBASE_STORAGE_BUCKET,
-    messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-    appId:             process.env.VITE_FIREBASE_APP_ID,
+type Step = 'home' | 'create' | 'join' | 'waiting' | 'joining';
+
+const MP_READY_GAMES = ['tictactoe', 'rps', 'chess', 'wordchain', 'ludo', 'carrom'];
+
+const PLAYER_OPTIONS_BY_GAME: Record<string, number[]> = {
+  ludo: [2, 3, 4],
+  carrom: [2, 4],
+};
+
+function playerOptionsFor(gameId: string): number[] {
+  return PLAYER_OPTIONS_BY_GAME[gameId] ?? [2];
+}
+
+export default function RoomHub({ me, onLaunch, onBack, autoJoinCode, groupChatId }: Props) {
+  const [step, setStep] = useState<Step>('home');
+  const [room, setRoom] = useState<RoomRow | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>('');
+
+  const mpGames = useMemo(() => GAMES.filter((g) => MP_READY_GAMES.includes(g.id)), []);
+  const [pickedGame, setPickedGame] = useState<string>(mpGames[0]?.id ?? GAMES[0].id);
+  const playerOpts = useMemo(() => playerOptionsFor(pickedGame), [pickedGame]);
+  const [maxPlayers, setMaxPlayers] = useState<number>(playerOpts[0]);
+  useEffect(() => { setMaxPlayers(playerOpts[0]); }, [pickedGame]); // eslint-disable-line
+
+  const [joinCode, setJoinCode] = useState('');
+  const [copied, setCopied] = useState(false);
+  const launchedRef = useRef(false);
+  const [notified, setNotified] = useState(false);
+  const [shareMsg, setShareMsg] = useState('');
+
+  // ── Notify group chat after room creation ────────────────────────────────
+  const notifyGroup = async (r: RoomRow) => {
+    if (!groupChatId || notified) return;
+    setNotified(true);
+    try {
+      await fetch('/api/notify-room', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chatId: groupChatId,
+          code: r.code,
+          gameId: r.game_id,
+          hostName: me.name,
+          maxPlayers: r.max_players,
+        }),
+      });
+      setShareMsg('✅ Group mein message bhej diya!');
+    } catch {
+      setShareMsg('⚠️ Group notify nahi hua');
+    }
   };
-  const app = getApps().length ? getApps()[0] : initializeApp(config);
-  return getDatabase(app);
-}
 
-const GAME_EMOJI = {
-  ludo: '🎲', chess: '♟️', carrom: '🎳',
-  tictactoe: '❌', rps: '✊', wordchain: '🔤',
-  emojiquiz: '😂', word: '📝', reaction: '⚡',
-};
-const GAME_NAME = {
-  ludo: 'Ludo Plus', chess: 'Chess', carrom: 'Carrom',
-  tictactoe: 'Tic Tac Toe', rps: 'Rock Paper Scissors',
-  wordchain: 'Word Chain', emojiquiz: 'Emoji Quiz',
-  word: 'Word Guess', reaction: 'Speed Catch',
-};
 
-// chatId -> { gameId, announced }
-const pendingRooms = new Map();
+  // ✅ Auto-join: Telegram bot se code aaya to seedha join karo
+  useEffect(() => {
+    if (!autoJoinCode || autoJoinCode.length !== 6) return;
+    setStep('joining');
+    setBusy(true);
+    setError('');
 
-// ── Firebase: room ready hote hi group mein message bhejo ─────────────────────
-function watchForRoomReady(bot, chatId, creatorName, gameId) {
-  const db = getDb();
-  const roomsRef = ref(db, 'rooms');
+    rooms.join(autoJoinCode.toUpperCase(), me)
+      .then((r) => {
+        setRoom(r);
+        mockBackend.joinRoom(r.code);
+        setStep('waiting');
+      })
+      .catch((e: any) => {
+        setError(e?.message || 'Room join nahi hua. Shayad room expire ho gaya.');
+        setStep('home');
+      })
+      .finally(() => setBusy(false));
+  }, [autoJoinCode]); // eslint-disable-line
 
-  // Naye rooms dekho — jo abhi ban rahe hain
-  const handler = onValue(roomsRef, async (snap) => {
-    if (!snap.exists()) return;
-    const allRooms = snap.val();
-
-    for (const [code, room] of Object.entries(allRooms)) {
-      const r = room;
-      // Sirf wo rooms jo is creator ne abhi banaye (last 10 seconds)
-      const createdAt = new Date(r.created_at).getTime();
-      const now = Date.now();
-      const isNew = (now - createdAt) < 15000; // 15 seconds window
-      const isWaiting = r.status === 'waiting';
-      const alreadyAnnounced = pendingRooms.get(code)?.announced;
-
-      if (isNew && isWaiting && !alreadyAnnounced && r.game_id === gameId) {
-        // Check karo creator is room mein host hai
-        const players = r.players ? Object.values(r.players) : [];
-        const isCreatorRoom = players.some(p =>
-          p.name === creatorName || p.name?.includes(creatorName)
-        );
-
-        if (isCreatorRoom) {
-          pendingRooms.set(code, { announced: true, chatId });
-          off(roomsRef, 'value', handler);
-
-          const emoji = GAME_EMOJI[gameId] || '🎮';
-          const name = GAME_NAME[gameId] || gameId;
-          const joinUrl = `${WEBAPP_URL}?startapp=${code}`;
-          const maxP = r.max_players || 2;
-
-          try {
-            await bot.telegram.sendMessage(chatId,
-              `${emoji} *${name} — Room Ready!*\n\n` +
-              `👤 *${creatorName}* ne room banaya\n` +
-              `🔑 Room Code: \`${code}\`\n` +
-              `👥 Players: 1/${maxP}\n\n` +
-              `👇 *Join karne ke liye button dabao — seedha room mein pohoncho!*`,
-              {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                  inline_keyboard: [[
-                    { text: `${emoji} ${name} Join Karo!`, web_app: { url: joinUrl } }
-                  ]]
-                }
-              }
-            );
-          } catch (e) {
-            console.error('[bot] group message error:', e.message);
-          }
-
-          // Cleanup after 5 minutes
-          setTimeout(() => pendingRooms.delete(code), 5 * 60 * 1000);
-        }
+  // Live room watch
+  useEffect(() => {
+    if (!room) return;
+    const unsub = rooms.watch(room.id, (r) => {
+      setRoom(r);
+      if (r.status === 'playing' && !launchedRef.current) {
+        launchedRef.current = true;
+        const idx = (r.players || []).findIndex((p) => p.id === me.id);
+        const role = (['p1', 'p2', 'p3', 'p4'][Math.max(0, idx)] || 'p1') as any;
+        mockBackend.joinRoom(r.code);
+        onLaunch(r, role);
       }
+    });
+    return () => unsub();
+  }, [room?.id]); // eslint-disable-line
+
+  const leaveRoom = async () => {
+    if (room && !launchedRef.current) {
+      try { await rooms.leave(room.id, me.id); } catch {}
     }
-  });
+    mockBackend.leaveRoom();
+    setRoom(null);
+    setStep('home');
+  };
 
-  // 2 minute baad watch band karo
-  setTimeout(() => {
-    off(roomsRef, 'value', handler);
-  }, 2 * 60 * 1000);
-}
+  const handleCreate = async () => {
+    setBusy(true); setError('');
+    try {
+      const r = await rooms.create({ gameId: pickedGame, maxPlayers, host: me });
+      setRoom(r);
+      mockBackend.joinRoom(r.code);
+      setStep('waiting');
+      // Notify group chat via server API
+      notifyGroup(r);
+    } catch (e: any) {
+      setError(e?.message || 'Room nahin ban paya. Phir try karo.');
+    } finally { setBusy(false); }
+  };
 
-// ── Firebase watchers for game events ────────────────────────────────────────
-const LUDO_COLOR_EMOJI = { red: '🔴', green: '🟢', yellow: '🟡', blue: '🔵' };
+  const handleJoin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setError('');
+    try {
+      const r = await rooms.join(joinCode.trim().toUpperCase(), me);
+      setRoom(r);
+      mockBackend.joinRoom(r.code);
+      setStep('waiting');
+    } catch (e: any) {
+      setError(e?.message || 'Join nahin ho paya.');
+    } finally { setBusy(false); }
+  };
 
-function watchRoom(bot, roomCode, chatId, gameId) {
-  const db = getDb();
-  const fns = [];
+  const handleStart = async () => {
+    if (!room) return;
+    setBusy(true); setError('');
+    try {
+      const first = room.players[0]?.id ?? me.id;
+      const r = await rooms.start(room.id, first);
+      setRoom(r);
+    } catch (e: any) {
+      setError(e?.message || 'Start nahin ho paya.');
+    } finally { setBusy(false); }
+  };
 
-  const roomRef = ref(db, `rooms/${roomCode}`);
-  let knownPlayers = new Set();
-  let gameStarted = false;
+  const copy = () => {
+    if (!room) return;
+    navigator.clipboard?.writeText(room.code).catch(() => {});
+    setCopied(true); setTimeout(() => setCopied(false), 1500);
+  };
 
-  const roomHandler = onValue(roomRef, async (snap) => {
-    if (!snap.exists()) return;
-    const val = snap.val();
-    const playersObj = val.players || {};
-    const playerList = Object.values(playersObj);
-
-    for (const p of playerList) {
-      if (!knownPlayers.has(p.id)) {
-        knownPlayers.add(p.id);
-        const isFirst = knownPlayers.size === 1;
-        if (!isFirst) {
-          try {
-            await bot.telegram.sendMessage(chatId,
-              `✅ *${p.name}* room mein join ho gaya!\n👥 ${playerList.length}/${val.max_players} players`,
-              { parse_mode: 'Markdown' }
-            );
-          } catch (e) { console.error('[bot] join notify:', e.message); }
-        }
-      }
-    }
-
-    if (val.status === 'playing' && !gameStarted) {
-      gameStarted = true;
-      const names = playerList.map(p => `• ${p.name}`).join('\n');
-      try {
-        await bot.telegram.sendMessage(chatId,
-          `🚀 *Game Shuru!*\n\n` +
-          `${GAME_EMOJI[val.game_id] || '🎮'} *${GAME_NAME[val.game_id] || val.game_id}*\n\n` +
-          `*Players:*\n${names}`,
-          { parse_mode: 'Markdown' }
-        );
-      } catch (e) { console.error('[bot] start notify:', e.message); }
-    }
-  });
-  fns.push(() => off(roomRef, 'value', roomHandler));
-
-  // Ludo winner watch
-  const ludoRef = ref(db, `gamestate/${roomCode}/ludo_sync_${roomCode}`);
-  let lastLudoWinner = null;
-  const ludoHandler = onValue(ludoRef, async (snap) => {
-    if (!snap.exists()) return;
-    const data = snap.val()?.payload ?? snap.val();
-    if (data.winner && data.winner !== lastLudoWinner) {
-      lastLudoWinner = data.winner;
-      try {
-        const rSnap = await get(ref(db, `rooms/${roomCode}`));
-        const players = Object.values(rSnap.val()?.players || {});
-        const roleMap = ['red', 'yellow', 'blue', 'green'];
-        const winnerIdx = roleMap.indexOf(data.winner);
-        const winnerName = players[winnerIdx]?.name || data.winner;
-        const e = LUDO_COLOR_EMOJI[data.winner] || '🏆';
-        await bot.telegram.sendMessage(chatId,
-          `${e} 🏆 *WINNER: ${winnerName}!*\n\n🎲 Ludo khatam! Congratulations! 🎉`,
-          { parse_mode: 'Markdown' }
-        );
-      } catch (e) { console.error('[bot] ludo winner:', e.message); }
-    }
-  });
-  fns.push(() => off(ludoRef, 'value', ludoHandler));
-
-  // Chess winner
-  const chessRef = ref(db, `gamestate/${roomCode}/chess_sync_state`);
-  let lastChessWinner = null;
-  const chessHandler = onValue(chessRef, async (snap) => {
-    if (!snap.exists()) return;
-    const data = snap.val()?.payload ?? snap.val();
-    if (data.winner && data.winner !== lastChessWinner) {
-      lastChessWinner = data.winner;
-      try {
-        const rSnap = await get(ref(db, `rooms/${roomCode}`));
-        const players = Object.values(rSnap.val()?.players || {});
-        const winnerName = data.winner === 'white' ? players[0]?.name || 'White' : players[1]?.name || 'Black';
-        await bot.telegram.sendMessage(chatId,
-          `♟️ 🏆 *WINNER: ${winnerName}!*\n\nChess khatam! Congratulations! 🎉`,
-          { parse_mode: 'Markdown' }
-        );
-      } catch (e) { console.error('[bot] chess winner:', e.message); }
-    }
-  });
-  fns.push(() => off(chessRef, 'value', chessHandler));
-
-  // TicTacToe winner
-  const tttRef = ref(db, `gamestate/${roomCode}/tictactoe_move`);
-  let lastTttWinner = null;
-  const tttHandler = onValue(tttRef, async (snap) => {
-    if (!snap.exists()) return;
-    const data = snap.val()?.payload ?? snap.val();
-    if (data.winner && data.winner !== lastTttWinner) {
-      lastTttWinner = data.winner;
-      try {
-        const rSnap = await get(ref(db, `rooms/${roomCode}`));
-        const players = Object.values(rSnap.val()?.players || {});
-        const msg = data.winner === 'draw'
-          ? `🤝 *TicTacToe Draw!*`
-          : `❌ 🏆 *WINNER: ${data.winner === 'X' ? players[0]?.name || 'P1' : players[1]?.name || 'P2'}!*`;
-        await bot.telegram.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
-      } catch (e) { console.error('[bot] ttt winner:', e.message); }
-    }
-  });
-  fns.push(() => off(tttRef, 'value', tttHandler));
-
-  return fns;
-}
-
-// ── Bot export ────────────────────────────────────────────────────────────────
-export function startBot() {
-  if (!TOKEN) { console.warn('[bot] No TOKEN'); return null; }
-  if (!WEBAPP_URL?.startsWith('https://')) { console.warn('[bot] Bad WEBAPP_URL:', WEBAPP_URL); return null; }
-
-  const bot = new Telegraf(TOKEN);
-
-  // WebApp sendData handler — jab user app mein room banaye
-  bot.on('message', async (ctx) => {
-    // Telegram WebApp sendData se aata hai
-    if (ctx.message?.web_app_data?.data) {
-      try {
-        const data = JSON.parse(ctx.message.web_app_data.data);
-        if (data.type === 'room_created') {
-          const { code, gameId, hostName, maxPlayers } = data;
-          const chatId = ctx.chat.id;
-          const emoji = GAME_EMOJI[gameId] || '🎮';
-          const name = GAME_NAME[gameId] || gameId;
-          const joinUrl = `${WEBAPP_URL}?startapp=${code}`;
-          const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
-
-          // Watch room for notifications
-          watchRoom(bot, code, chatId, gameId);
-
-          await bot.telegram.sendMessage(chatId,
-            `${emoji} *${name} — Room Ready!*
-
-` +
-            `👤 *${creator}* ne room banaya
-` +
-            `🔑 Room Code: \`${code}\`
-` +
-            `👥 Players: 1/${maxPlayers}
-
-` +
-            `👇 *Join karne ke liye button dabao!*`,
-            {
-              parse_mode: 'Markdown',
-              reply_markup: {
-                inline_keyboard: [[
-                  { text: `${emoji} ${name} Join Karo!`, web_app: { url: joinUrl } }
-                ]]
-              }
-            }
-          );
-        }
-      } catch (e) {
-        console.error('[bot] web_app_data error:', e.message);
-      }
-    }
-  });
-
-  // /start — seedha Mini App kholo, agar room code hai to join karo
-  bot.start(async (ctx) => {
-    const roomCode = (ctx.startPayload?.length === 6) ? ctx.startPayload.toUpperCase() : '';
-    const url = roomCode ? `${WEBAPP_URL}?startapp=${roomCode}` : WEBAPP_URL;
-    const name = ctx.from.first_name || 'Player';
-
-    if (roomCode) {
-      await ctx.reply(
-        `🎮 *${name}, room \`${roomCode}\` mein join karo!*\n\n👇 Button dabao`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[{ text: '🎮 Seedha Join Karo!', web_app: { url } }]] }
-        }
-      );
-    } else {
-      await ctx.reply(
-        `🎮 *GameSphere mein swagat hai, ${name}!*\n\nDosto ke saath multiplayer games khelo!\n\n📢 Group mein \`/game\` type karo room banane ke liye.`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[{ text: '🎮 Game Lobby Kholo', web_app: { url } }]] }
-        }
-      );
-    }
-  });
-
-  // /game — Mini App kholo, room banao, group mein auto-announce
-  bot.command('game', async (ctx) => {
-    const parts = ctx.message.text.trim().split(/\s+/);
-    const gameArg = parts[1]?.toLowerCase();
-    const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-    const chatId = ctx.chat.id;
-
-    const gameId = GAME_NAME[gameArg] ? gameArg : 'ludo';
-    const emoji = GAME_EMOJI[gameId] || '🎮';
-    const name = GAME_NAME[gameId] || 'Game';
-
-    const creatorName = ctx.from.first_name || ctx.from.username || 'Player';
-    const creator = ctx.from.username ? `@${ctx.from.username}` : creatorName;
-
-    // Game URL — seedha us game pe jaaye
-    const gameUrl = `${WEBAPP_URL}?game=${gameId}&from=group&chatId=${chatId}`;
-
-    // Group mein watch shuru karo — jab room bane to announce karo
-    if (isGroup) {
-      watchForRoomReady(bot, chatId, creatorName, gameId);
-    }
-
-    // Sirf us member ko Mini App button bhejo
-    await ctx.reply(
-      `${emoji} *${creator} — ${name} room banao!*\n\nNeeche button dabao, game khulega — room banao aur group mein link aayega automatically!`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [[
-            { text: `${emoji} ${name} — Room Banao`, web_app: { url: gameUrl } }
-          ]]
-        }
-      }
+  // ── Auto-joining loader ──────────────────────────────────────────────
+  if (step === 'joining') {
+    return (
+      <Shell onBack={onBack} title="Room Join Ho Raha Hai...">
+        <div className="flex flex-col items-center justify-center h-48 gap-4">
+          <Loader2 className="w-12 h-12 animate-spin text-indigo-400" />
+          <p className="text-gray-400 text-sm">Room <span className="font-mono font-black text-white">{autoJoinCode}</span> mein ja rahe ho...</p>
+          {error && <ErrorBox text={error} />}
+        </div>
+      </Shell>
     );
-  });
+  }
 
-  // /help
-  bot.command('help', (ctx) =>
-    ctx.reply(
-      '🎮 *GameSphere Commands*\n\n' +
-      '`/game` — Ludo room banao\n' +
-      '`/game chess` — Chess\n' +
-      '`/game carrom` — Carrom\n' +
-      '`/game tictactoe` — TicTacToe\n' +
-      '`/game rps` — Rock Paper Scissors\n\n' +
-      '📢 Room bante hi group mein join link aayega!',
-      { parse_mode: 'Markdown' }
-    )
+  // ── Home ─────────────────────────────────────────────────────────────
+  if (step === 'home') {
+    return (
+      <Shell onBack={onBack} title="Multiplayer" subtitle="Ek room banao ya code daal kar join karo">
+        <div className="grid gap-4 w-full max-w-md mx-auto mt-6">
+          <button
+            onClick={() => setStep('create')}
+            className="group bg-gradient-to-br from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 p-5 rounded-2xl text-left shadow-xl border border-white/10 active:scale-[0.98] transition"
+          >
+            <div className="flex items-center gap-3 mb-1">
+              <div className="w-11 h-11 rounded-xl bg-white/15 flex items-center justify-center"><Plus className="w-6 h-6 text-white" /></div>
+              <div className="font-black text-white text-xl">Create Room</div>
+            </div>
+            <div className="text-white/80 text-sm">Game choose karo, max players set karo, code share karo.</div>
+          </button>
+
+          <button
+            onClick={() => setStep('join')}
+            className="group bg-[#1c2836] hover:border-indigo-400 p-5 rounded-2xl text-left shadow-xl border border-gray-700 active:scale-[0.98] transition"
+          >
+            <div className="flex items-center gap-3 mb-1">
+              <div className="w-11 h-11 rounded-xl bg-indigo-500/15 flex items-center justify-center"><KeyRound className="w-6 h-6 text-indigo-400" /></div>
+              <div className="font-black text-white text-xl">Join Room</div>
+            </div>
+            <div className="text-gray-400 text-sm">Dost ne jo 6-letter code diya hai, vo daalo.</div>
+          </button>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Create ────────────────────────────────────────────────────────────
+  if (step === 'create') {
+    return (
+      <Shell onBack={() => setStep('home')} title="Create Room" subtitle="Game aur players choose karo">
+        <div className="max-w-md mx-auto w-full mt-4 space-y-5">
+          <div>
+            <Label>Game</Label>
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              {mpGames.map((g) => (
+                <button
+                  key={g.id}
+                  onClick={() => setPickedGame(g.id)}
+                  className={`text-left rounded-xl p-3 border transition active:scale-[0.98] ${
+                    pickedGame === g.id
+                      ? 'bg-indigo-500/15 border-indigo-400 ring-2 ring-indigo-400/40'
+                      : 'bg-[#1c2836] border-gray-700 hover:border-gray-500'
+                  }`}
+                >
+                  <div className={`text-white font-bold text-sm bg-gradient-to-r ${g.color} bg-clip-text text-transparent`}>{g.title}</div>
+                  <div className="text-[11px] text-gray-400 line-clamp-2 mt-0.5">{g.description}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <Label>Max Players</Label>
+            <div className="flex gap-2 mt-2">
+              {playerOpts.map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setMaxPlayers(n)}
+                  className={`flex-1 py-3 rounded-xl border font-black transition ${
+                    maxPlayers === n
+                      ? 'bg-indigo-500/15 border-indigo-400 text-white ring-2 ring-indigo-400/40'
+                      : 'bg-[#1c2836] border-gray-700 text-gray-300 hover:border-gray-500'
+                  }`}
+                >
+                  {n}P
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {error && <ErrorBox text={error} />}
+
+          <button
+            onClick={handleCreate}
+            disabled={busy}
+            className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-black py-4 rounded-2xl disabled:opacity-50 shadow-xl flex items-center justify-center gap-2 active:scale-95 transition"
+          >
+            {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
+            {busy ? 'Banaya jaa raha hai...' : 'Room Create Karo'}
+          </button>
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Join ──────────────────────────────────────────────────────────────
+  if (step === 'join') {
+    return (
+      <Shell onBack={() => setStep('home')} title="Join Room" subtitle="6-letter room code daalo">
+        <form onSubmit={handleJoin} className="max-w-md mx-auto w-full mt-6 space-y-4">
+          <input
+            value={joinCode}
+            onChange={(e) => { setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6)); setError(''); }}
+            placeholder="ABC123"
+            maxLength={6}
+            autoFocus
+            className="w-full bg-[#121922] border border-gray-700 focus:border-indigo-400 outline-none rounded-2xl px-4 py-5 text-center text-4xl font-black font-mono tracking-[0.5em] text-white"
+          />
+          {error && <ErrorBox text={error} />}
+          <button
+            type="submit"
+            disabled={busy || joinCode.length < 4}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-black py-4 rounded-2xl disabled:opacity-50 shadow-xl flex items-center justify-center gap-2 active:scale-95 transition"
+          >
+            {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <KeyRound className="w-5 h-5" />}
+            {busy ? 'Join ho rahe ho...' : 'Room Join Karo'}
+          </button>
+        </form>
+      </Shell>
+    );
+  }
+
+  // ── Waiting room ──────────────────────────────────────────────────────
+  if (!room) return null;
+  const gameDef = GAMES.find((g) => g.id === room.game_id);
+  const isHost = room.host_id === me.id;
+  const filled = room.players.length;
+  const total = room.max_players;
+  const ready = filled >= total;
+
+  return (
+    <Shell onBack={leaveRoom} backLabel="Leave" title="Room Lobby" subtitle={gameDef?.title ?? room.game_id}>
+      <div className="max-w-md mx-auto w-full mt-4 space-y-4">
+        <div className="bg-[#1c2836] rounded-3xl p-5 border border-indigo-500/30 shadow-xl">
+          <div className="text-xs text-gray-400 font-bold uppercase tracking-widest text-center">Room Code</div>
+          <div className="text-5xl font-black text-white text-center my-3 font-mono tracking-[0.4em]">{room.code}</div>
+          <button onClick={copy} className="w-full bg-[#121922] border border-gray-700 hover:border-indigo-400 rounded-xl py-3 text-sm font-bold text-indigo-300 flex items-center justify-center gap-2 transition">
+            {copied ? <><Check className="w-4 h-4 text-green-400" /> Copy Ho Gaya</> : <><Copy className="w-4 h-4" /> Code Copy Karo</>}
+          </button>
+          {groupChatId && (
+            <button
+              onClick={() => notifyGroup(room!)}
+              className="w-full mt-2 bg-blue-600/20 border border-blue-500/40 hover:border-blue-400 rounded-xl py-3 text-sm font-bold text-blue-300 flex items-center justify-center gap-2 transition"
+            >
+              <Send className="w-4 h-4" /> 📢 Group mein Share Karo
+            </button>
+          )}
+          {shareMsg && (
+            <div className="text-center text-xs text-green-400 font-bold mt-1">{shareMsg}</div>
+          )}
+        </div>
+
+        <div className="bg-[#1c2836] rounded-2xl p-4 border border-gray-700">
+          <div className="flex items-center justify-between mb-3">
+            <div className="text-sm font-bold text-gray-300 flex items-center gap-2"><Users className="w-4 h-4" /> Players {filled}/{total}</div>
+            {!ready && <div className="text-xs text-blue-400 flex items-center gap-1"><Wifi className="w-3 h-3 animate-pulse" /> waiting...</div>}
+          </div>
+          <div className="space-y-2">
+            {Array.from({ length: total }).map((_, i) => {
+              const p = room.players[i];
+              return (
+                <div key={i} className={`flex items-center gap-3 rounded-xl p-3 border ${p ? 'bg-[#121922] border-gray-700' : 'bg-[#121922]/40 border-dashed border-gray-800'}`}>
+                  {p ? (
+                    <>
+                      <div className="w-9 h-9 rounded-full bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center font-black text-indigo-300">
+                        {p.name?.[0]?.toUpperCase() ?? 'P'}
+                      </div>
+                      <div className="flex-1">
+                        <div className="text-white font-bold text-sm flex items-center gap-1.5">
+                          {p.name}
+                          {p.id === room.host_id && <Crown className="w-3.5 h-3.5 text-yellow-400" />}
+                          {p.id === me.id && <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded font-bold">YOU</span>}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-gray-500 text-sm italic">Waiting for player...</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {error && <ErrorBox text={error} />}
+
+        {isHost ? (
+          <button
+            onClick={handleStart}
+            disabled={!ready || busy}
+            className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 text-white font-black py-4 rounded-2xl disabled:opacity-40 shadow-xl flex items-center justify-center gap-2 active:scale-95 transition"
+          >
+            {busy ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
+            {ready ? 'Start Game' : `Wait for ${total - filled} more...`}
+          </button>
+        ) : (
+          <div className="text-center text-gray-400 text-sm py-3">
+            Host ke start karne ka wait karo...
+          </div>
+        )}
+
+        <button onClick={leaveRoom} className="w-full text-gray-400 hover:text-red-400 text-sm py-2 flex items-center justify-center gap-1.5 transition">
+          <LogOut className="w-4 h-4" /> Leave Room
+        </button>
+      </div>
+    </Shell>
   );
+}
 
-  bot.catch((err) => console.error('[bot] error:', err.message));
-  bot.launch().then(() => console.log('[bot] ✅ GameSphere Bot Started!'));
-  process.once('SIGINT', () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
-  return bot;
+function Shell({ children, onBack, backLabel = 'Back', title, subtitle }: { children: React.ReactNode; onBack: () => void; backLabel?: string; title: string; subtitle?: string }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+      className="p-5 pb-10 h-full overflow-y-auto bg-gradient-to-b from-[#1a2533] to-[#121922] text-white"
+    >
+      <div className="flex items-center gap-3 mb-4">
+        <button onClick={onBack} className="w-10 h-10 rounded-xl bg-[#1c2836] border border-gray-700 hover:border-indigo-400 flex items-center justify-center transition">
+          <ArrowLeft className="w-5 h-5" />
+        </button>
+        <div>
+          <div className="text-xs text-indigo-400 font-bold uppercase tracking-widest">{backLabel === 'Leave' ? 'Lobby' : 'Multiplayer'}</div>
+          <div className="text-2xl font-black">{title}</div>
+          {subtitle && <div className="text-xs text-gray-400 -mt-0.5">{subtitle}</div>}
+        </div>
+      </div>
+      {children}
+    </motion.div>
+  );
+}
+
+function Label({ children }: { children: React.ReactNode }) {
+  return <div className="text-xs font-bold text-gray-400 uppercase tracking-widest">{children}</div>;
+}
+
+function ErrorBox({ text }: { text: string }) {
+  return (
+    <div className="flex items-start gap-2 bg-red-500/10 border border-red-500/30 rounded-xl p-3">
+      <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+      <div className="text-red-300 text-sm">{text}</div>
+    </div>
+  );
 }
