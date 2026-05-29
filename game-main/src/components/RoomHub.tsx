@@ -97,6 +97,20 @@ export default function RoomHub({ me, onLaunch, onBack, autoJoinCode }: Props) {
       setRoom(r);
       mockBackend.joinRoom(r.code);
       setStep('waiting');
+
+      // Telegram WebApp: bot ko notify karo room code ke saath
+      const tg = (window as any).Telegram?.WebApp;
+      if (tg?.sendData) {
+        try {
+          tg.sendData(JSON.stringify({
+            type: 'room_created',
+            code: r.code,
+            gameId: pickedGame,
+            maxPlayers,
+            hostName: me.name,
+          }));
+        } catch (_) {}
+      }
     } catch (e: any) {
       setError(e?.message || 'Room nahin ban paya. Phir try karo.');
     } finally { setBusy(false); }
