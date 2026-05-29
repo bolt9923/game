@@ -46,6 +46,17 @@ export default function App() {
     { user: 'ninja_pro', text: 'Word Seek level 10 is impossible lol', time: '10:45' }
   ]);
   const [copiedId, setCopiedId] = useState(false);
+  const [autoJoinCode, setAutoJoinCode] = useState<string | null>(null);
+
+  // ✅ Telegram bot link se aaye room code ko handle karo
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const startapp = params.get('startapp');
+    if (startapp && startapp.length === 6) {
+      setAutoJoinCode(startapp.toUpperCase());
+      setView('multiplayer');
+    }
+  }, []);
 
   useEffect(() => {
     setMatchHistory(db.getMatchHistory());
@@ -602,6 +613,7 @@ export default function App() {
                   me={{ id: db.getUser().id, name: db.getUser().name, avatar: db.getUser().avatar }}
                   onLaunch={handleRoomLaunch}
                   onBack={() => setView('home')}
+                  autoJoinCode={autoJoinCode ?? undefined}
                 />
               </motion.div>
             ) : view === 'leaderboard' ? (
