@@ -48,12 +48,27 @@ export default function App() {
   const [copiedId, setCopiedId] = useState(false);
   const [autoJoinCode, setAutoJoinCode] = useState<string | null>(null);
 
-  // ✅ Telegram bot link se aaye room code ko handle karo
+  // ✅ Telegram bot link se aaye room code ya game param handle karo
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+
+    // Method 1: URL param ?startapp=ROOMCODE (join existing room)
     const startapp = params.get('startapp');
-    if (startapp && startapp.length === 6) {
-      setAutoJoinCode(startapp.toUpperCase());
+
+    // Method 2: Telegram WebApp start_param
+    const tgStartParam = (window as any).Telegram?.WebApp?.initDataUnsafe?.start_param;
+
+    const code = (tgStartParam || startapp || '').toUpperCase();
+    if (code && code.length === 6) {
+      setAutoJoinCode(code);
+      setView('multiplayer');
+      return;
+    }
+
+    // Method 3: ?game=ludo — seedha multiplayer create screen pe jao
+    const gameParam = params.get('game');
+    const fromGroup = params.get('from') === 'group';
+    if (gameParam && fromGroup) {
       setView('multiplayer');
     }
   }, []);
