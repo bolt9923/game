@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import {
   ArrowLeft, Users, Copy, Check, Play, Wifi, Plus, KeyRound, Loader2,
   Crown, LogOut, AlertCircle,
@@ -12,51 +12,64 @@ interface Props {
   me: RoomPlayer;
   onLaunch: (room: RoomRow, myRole: 'p1' | 'p2' | 'p3' | 'p4') => void;
   onBack: () => void;
+  // ✅ Telegram se aaya room code — seedha join karo
+  autoJoinCode?: string;
 }
 
-type Step = 'home' | 'create' | 'join' | 'waiting';
+type Step = 'home' | 'create' | 'join' | 'waiting' | 'joining';
 
-// All games that support online multiplayer
 const MP_READY_GAMES = ['tictactoe', 'rps', 'chess', 'wordchain', 'ludo', 'carrom'];
 
 const PLAYER_OPTIONS_BY_GAME: Record<string, number[]> = {
   ludo: [2, 3, 4],
   carrom: [2, 4],
-  // everything else: strict 2-player
 };
 
 function playerOptionsFor(gameId: string): number[] {
   return PLAYER_OPTIONS_BY_GAME[gameId] ?? [2];
 }
 
-
-export default function RoomHub({ me, onLaunch, onBack }: Props) {
+export default function RoomHub({ me, onLaunch, onBack, autoJoinCode }: Props) {
   const [step, setStep] = useState<Step>('home');
   const [room, setRoom] = useState<RoomRow | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>('');
 
-  // Create form
   const mpGames = useMemo(() => GAMES.filter((g) => MP_READY_GAMES.includes(g.id)), []);
   const [pickedGame, setPickedGame] = useState<string>(mpGames[0]?.id ?? GAMES[0].id);
-
   const playerOpts = useMemo(() => playerOptionsFor(pickedGame), [pickedGame]);
   const [maxPlayers, setMaxPlayers] = useState<number>(playerOpts[0]);
   useEffect(() => { setMaxPlayers(playerOpts[0]); }, [pickedGame]); // eslint-disable-line
 
-  // Join form
   const [joinCode, setJoinCode] = useState('');
-
-  // Waiting / Live room
   const [copied, setCopied] = useState(false);
   const launchedRef = useRef(false);
 
-  // Subscribe to live room updates while in waiting/playing
+  // ✅ Auto-join: Telegram bot se code aaya to seedha join karo
+  useEffect(() => {
+    if (!autoJoinCode || autoJoinCode.length !== 6) return;
+    setStep('joining');
+    setBusy(true);
+    setError('');
+
+    rooms.join(autoJoinCode.toUpperCase(), me)
+      .then((r) => {
+        setRoom(r);
+        mockBackend.joinRoom(r.code);
+        setStep('waiting');
+      })
+      .catch((e: any) => {
+        setError(e?.message || 'Room join nahi hua. Shayad room expire ho gaya.');
+        setStep('home');
+      })
+      .finally(() => setBusy(false));
+  }, [autoJoinCode]); // eslint-disable-line
+
+  // Live room watch
   useEffect(() => {
     if (!room) return;
     const unsub = rooms.watch(room.id, (r) => {
       setRoom(r);
-      // If host started -> launch for joining players too
       if (r.status === 'playing' && !launchedRef.current) {
         launchedRef.current = true;
         const idx = (r.players || []).findIndex((p) => p.id === me.id);
@@ -68,7 +81,6 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
     return () => unsub();
   }, [room?.id]); // eslint-disable-line
 
-  // Cleanup: if user backs out without launching, remove self
   const leaveRoom = async () => {
     if (room && !launchedRef.current) {
       try { await rooms.leave(room.id, me.id); } catch {}
@@ -109,7 +121,6 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
     try {
       const first = room.players[0]?.id ?? me.id;
       const r = await rooms.start(room.id, first);
-      // launch happens via the watch() effect (status=playing path) on all clients
       setRoom(r);
     } catch (e: any) {
       setError(e?.message || 'Start nahin ho paya.');
@@ -122,7 +133,20 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
     setCopied(true); setTimeout(() => setCopied(false), 1500);
   };
 
-  // ── UI ─────────────────────────────────────────────────────────────
+  // ── Auto-joining loader ──────────────────────────────────────────────
+  if (step === 'joining') {
+    return (
+      <Shell onBack={onBack} title="Room Join Ho Raha Hai...">
+        <div className="flex flex-col items-center justify-center h-48 gap-4">
+          <Loader2 className="w-12 h-12 animate-spin text-indigo-400" />
+          <p className="text-gray-400 text-sm">Room <span className="font-mono font-black text-white">{autoJoinCode}</span> mein ja rahe ho...</p>
+          {error && <ErrorBox text={error} />}
+        </div>
+      </Shell>
+    );
+  }
+
+  // ── Home ─────────────────────────────────────────────────────────────
   if (step === 'home') {
     return (
       <Shell onBack={onBack} title="Multiplayer" subtitle="Ek room banao ya code daal kar join karo">
@@ -153,6 +177,7 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
     );
   }
 
+  // ── Create ────────────────────────────────────────────────────────────
   if (step === 'create') {
     return (
       <Shell onBack={() => setStep('home')} title="Create Room" subtitle="Game aur players choose karo">
@@ -194,9 +219,6 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
                 </button>
               ))}
             </div>
-            {playerOpts.length === 1 && (
-              <div className="text-[11px] text-gray-500 mt-1">Ye game sirf {playerOpts[0]} players support karta hai.</div>
-            )}
           </div>
 
           {error && <ErrorBox text={error} />}
@@ -214,6 +236,7 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
     );
   }
 
+  // ── Join ──────────────────────────────────────────────────────────────
   if (step === 'join') {
     return (
       <Shell onBack={() => setStep('home')} title="Join Room" subtitle="6-letter room code daalo">
@@ -240,7 +263,7 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
     );
   }
 
-  // Waiting room
+  // ── Waiting room ──────────────────────────────────────────────────────
   if (!room) return null;
   const gameDef = GAMES.find((g) => g.id === room.game_id);
   const isHost = room.host_id === me.id;
@@ -280,7 +303,6 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
                           {p.id === room.host_id && <Crown className="w-3.5 h-3.5 text-yellow-400" />}
                           {p.id === me.id && <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.5 rounded font-bold">YOU</span>}
                         </div>
-                        <div className="text-[10px] text-gray-500 font-mono">{p.id}</div>
                       </div>
                     </>
                   ) : (
@@ -317,7 +339,6 @@ export default function RoomHub({ me, onLaunch, onBack }: Props) {
   );
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────
 function Shell({ children, onBack, backLabel = 'Back', title, subtitle }: { children: React.ReactNode; onBack: () => void; backLabel?: string; title: string; subtitle?: string }) {
   return (
     <motion.div
