@@ -128,6 +128,15 @@ function watchRoom(bot, roomCode, chatId, gameId) {
   return unsubs;
 }
 
+// Helper: build inline button — web_app only works in private chat, use url in groups
+function joinButton(emoji, name, url, chatType) {
+  const isGroup = chatType === 'group' || chatType === 'supergroup';
+  const btn = isGroup
+    ? { text: `${emoji} ${name} Join Karo!`, url }
+    : { text: `${emoji} ${name} Join Karo!`, web_app: { url } };
+  return { inline_keyboard: [[btn]] };
+}
+
 // ── Watch Firebase for new room then announce in group ────────────────────────
 function watchForRoomReady(bot, chatId, creatorName, gameId) {
   const db = getDb();
@@ -158,16 +167,15 @@ function watchForRoomReady(bot, chatId, creatorName, gameId) {
 
       console.log(`[bot] Room ${code} ready — announcing in chat ${chatId}`);
       try {
+        // Groups don't support web_app buttons — use plain url button instead
+        const reply_markup = { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, url }]] };
         await bot.telegram.sendMessage(chatId,
           `${emoji} *${name} — Room Ready!*\n\n` +
           `👤 *${creatorName}* ne room banaya\n` +
           `🔑 Room Code: \`${code}\`\n` +
           `👥 Players: 1/${room.max_players}\n\n` +
           `👇 *Button dabao — seedha room mein pohoncho!*`,
-          {
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, web_app: { url } }]] }
-          }
+          { parse_mode: 'Markdown', reply_markup }
         );
         watchRoom(bot, code, chatId, gameId);
       } catch(e) { console.error('[bot] announce error:', e.message); }
@@ -230,11 +238,15 @@ export function startBot() {
       watchForRoomReady(bot, ctx.chat.id, creatorName, gameId);
     }
 
+    // web_app buttons don't work in groups — use url button there
+    const btn = isGroup
+      ? { text: `${emoji} ${name} — Room Banao`, url: gameUrl }
+      : { text: `${emoji} ${name} — Room Banao`, web_app: { url: gameUrl } };
     await ctx.reply(
       `${emoji} *${creator} — ${name} room banao!*\n\n` +
       `Button dabao → game khulega → *Create Room* dabao\n` +
       `Room bante hi group mein join link aa jaayega! 🚀`,
-      { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:`${emoji} ${name} — Room Banao`, web_app:{ url:gameUrl } }]] } }
+      { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[btn]] } }
     );
   });
 
@@ -261,11 +273,13 @@ export function startBot() {
         const url     = `${WEBAPP_URL}?startapp=${code}`;
         const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
         watchRoom(bot, code, chatId, gameId);
+        // Groups require url buttons, not web_app buttons
+        const reply_markup = { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, url }]] };
         await bot.telegram.sendMessage(chatId,
           `${emoji} *${name} — Room Ready!*\n\n` +
           `👤 *${creator}* ne room banaya\n🔑 Room Code: \`${code}\`\n👥 Players: 1/${maxPlayers}\n\n` +
           `👇 *Button dabao — seedha room mein pohoncho!*`,
-          { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:`${emoji} ${name} Join Karo!`, web_app:{ url } }]] } }
+          { parse_mode:'Markdown', reply_markup }
         );
       }
     } catch(e) { console.error('[bot] web_app_data:', e.message); }
