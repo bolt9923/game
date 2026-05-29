@@ -1,1369 +1,1245 @@
-import React, { useEffect } from 'react';
-import { ArrowLeft } from 'lucide-react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import Matter from 'matter-js';
+import { ArrowLeft, Bot, Users, Globe, Crown, RotateCcw } from 'lucide-react';
+import { mockBackend } from '../lib/mockBackend';
+import { mpSession } from '../lib/mpSession';
+import { rooms as firebaseRooms, type RoomPlayer as FbRoomPlayer } from '../lib/rooms';
+import { db as gameDb } from '../lib/db';
 
+// ════════════════════════════════════════════════════════
+//  TYPES
+// ════════════════════════════════════════════════════════
 interface CarromProps {
   onGameOver: (score: number, result?: 'Win' | 'Loss' | 'Draw' | 'Completed') => void;
   onBack: () => void;
 }
+type GameMode = 'menu' | 'local' | 'bot' | 'online_lobby' | 'online_playing';
+type Player   = 'p1' | 'p2';
+type CoinColor = 'white' | 'black' | 'queen' | 'striker';
 
-const CARROM_CSS = `
-  :root {
-    --wood-dark: #4a2800;
-    --wood-mid:  #7c4a10;
-    --wood-light:#c8860a;
-    --wood-grain:#b8760a;
-    --gold:      #e8a020;
-    --gold-light:#f5cc60;
-    --cream:     #fdf4e3;
-    --ivory:     #f5edd8;
-    --ink:       #1a0e00;
-    --ink-soft:  #3d2800;
-    --white-coin:#f0ede5;
-    --black-coin:#1e1a2e;
-    --queen-red: #cc2222;
-    --queen-glow:#ff4444;
-    --green-felt:#2d5a1b;
-    --rule-box:  #fef9ee;
-    --border-warm:#d4921a;
-    --shadow-deep:rgba(30,10,0,0.35);
-    --foul-red:  #c0392b;
-    --win-gold:  #d4ac0d;
-    --section-bg:#fffbf0;
-  }
+// ════════════════════════════════════════════════════════
+//  CONSTANTS
+// ════════════════════════════════════════════════════════
+// Physics world is 600×600 units
+const W = 600, H = 600;
+const BORDER  = 52;       // playable area starts here
+const INNER   = BORDER + 6;
+const POCKET_R = 26;      // pocket hole radius (physics sensor)
+const COIN_R   = 13;      // coin radius
+const QUEEN_R  = 13;      // queen radius
+const STRIKER_R= 17;      // striker radius
+const MAX_PULL = 150;     // max drag pixels (in physics units)
+const FORCE_K  = 0.085;   // force multiplier
+const TIMER_SEC= 30;
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+// Pocket centres
+const POCKETS = [
+  { x: BORDER, y: BORDER },
+  { x: W - BORDER, y: BORDER },
+  { x: BORDER, y: H - BORDER },
+  { x: W - BORDER, y: H - BORDER },
+];
 
-  body {
-    background: linear-gradient(160deg, #2a1400 0%, #1a0c00 40%, #0d0600 100%);
-    font-family: 'DM Sans', sans-serif;
-    color: var(--ink);
-    min-height: 100vh;
-    padding: 0;
-  }
+// Striker lane Y for each player
+const LANE_Y: Record<Player, number> = {
+  p1: H - BORDER - 35,   // bottom
+  p2: BORDER + 35,       // top
+};
 
-  /* ── HEADER ── */
-  .header {
-    background: linear-gradient(135deg, var(--wood-dark) 0%, #2a1200 50%, var(--wood-dark) 100%);
-    border-bottom: 4px solid var(--gold);
-    padding: 36px 40px 28px;
-    text-align: center;
-    position: relative;
-    overflow: hidden;
-  }
-  .header::before {
-    content: '';
-    position: absolute; inset: 0;
-    background: repeating-linear-gradient(45deg, transparent, transparent 18px, rgba(255,200,80,0.04) 18px, rgba(255,200,80,0.04) 36px);
-  }
-  .header-badge {
-    display: inline-block;
-    background: var(--gold);
-    color: var(--wood-dark);
-    font-family: 'Bebas Neue', sans-serif;
-    font-size: 11px;
-    letter-spacing: 4px;
-    padding: 4px 18px;
-    border-radius: 2px;
-    margin-bottom: 10px;
-  }
-  .header h1 {
-    font-family: 'Playfair Display', serif;
-    font-size: clamp(38px, 7vw, 72px);
-    font-weight: 900;
-    color: var(--gold-light);
-    line-height: 1;
-    text-shadow: 0 4px 20px rgba(0,0,0,0.5), 0 0 60px rgba(232,160,32,0.3);
-    letter-spacing: -1px;
-  }
-  .header h1 span { color: var(--cream); }
-  .header-sub {
-    font-family: 'Crimson Pro', serif;
-    font-size: 18px;
-    color: rgba(245,220,160,0.75);
-    margin-top: 8px;
-    font-style: italic;
-  }
-  .header-coins {
-    display: flex; align-items: center; justify-content: center; gap: 18px;
-    margin-top: 16px;
-  }
-  .hcoin {
-    display: flex; align-items: center; gap: 7px;
-    background: rgba(255,255,255,0.08);
-    border: 1px solid rgba(255,255,255,0.15);
-    border-radius: 20px;
-    padding: 5px 14px;
-    font-size: 12px; font-weight: 600; color: var(--cream);
-  }
-  .hcoin-dot {
-    width: 16px; height: 16px; border-radius: 50%;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-  }
+const P_COLORS: Record<Player, string> = { p1: '#f59e0b', p2: '#6366f1' };
+const P_LABELS: Record<Player, string> = { p1: 'Player 1', p2: 'Player 2' };
 
-  /* ── MAIN LAYOUT ── */
-  .page {
-    max-width: 1280px;
-    margin: 0 auto;
-    padding: 40px 24px;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 28px;
-  }
-  .full-width { grid-column: 1 / -1; }
+// ════════════════════════════════════════════════════════
+//  ONLINE LOBBY
+// ════════════════════════════════════════════════════════
+interface LobbyProps {
+  onStart: (role: Player, roomId: string) => void;
+  onBack: () => void;
+}
+function OnlineLobby({ onStart, onBack }: LobbyProps) {
+  const [view, setView]     = useState<'main'|'join'|'wait'>('main');
+  const [code, setCode]     = useState('');
+  const [inp, setInp]       = useState('');
+  const [err, setErr]       = useState('');
+  const [busy, setBusy]     = useState(false);
+  const [rows, setRows]     = useState<FbRoomPlayer[]>([]);
+  const [myRole, setMyRole] = useState<Player>('p1');
+  const [rowId, setRowId]   = useState('');
+  const [copied, setCopied] = useState(false);
+  const unsubRef = useRef<(()=>void)|null>(null);
+  const gone     = useRef(false);
+  const user     = gameDb.getUser();
+  const me: FbRoomPlayer = { id: user.id, name: user.name, avatar: user.avatar };
 
-  /* ── SECTION CARD ── */
-  .card {
-    background: var(--section-bg);
-    border-radius: 16px;
-    border: 2px solid var(--border-warm);
-    overflow: hidden;
-    box-shadow: 0 8px 32px var(--shadow-deep), 0 2px 0 rgba(255,220,100,0.15) inset;
-  }
-  .card-header {
-    background: linear-gradient(135deg, var(--wood-mid) 0%, var(--wood-dark) 100%);
-    padding: 14px 20px;
-    display: flex; align-items: center; gap: 10px;
-    border-bottom: 2px solid var(--gold);
-  }
-  .card-num {
-    width: 28px; height: 28px; border-radius: 50%;
-    background: var(--gold);
-    color: var(--wood-dark);
-    font-family: 'Bebas Neue', sans-serif;
-    font-size: 16px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0;
-  }
-  .card-title {
-    font-family: 'Bebas Neue', sans-serif;
-    font-size: 22px;
-    letter-spacing: 2px;
-    color: var(--gold-light);
-  }
-  .card-body { padding: 20px; }
+  useEffect(() => () => { gone.current = true; unsubRef.current?.(); }, []);
 
-  /* ── BOARD SECTION ── */
-  .board-wrap {
-    display: flex; gap: 24px; align-items: flex-start;
-  }
-  .board-svg-container {
-    flex-shrink: 0;
-    position: relative;
-  }
-  .board-labels { flex: 1; display: flex; flex-direction: column; gap: 10px; }
-  .label-item {
-    display: flex; align-items: flex-start; gap: 8px;
-    background: var(--rule-box);
-    border: 1px solid rgba(200,140,20,0.3);
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-size: 12px;
-  }
-  .label-dot {
-    width: 10px; height: 10px; border-radius: 50%; margin-top: 3px; flex-shrink: 0;
-  }
-  .label-item strong { display: block; font-weight: 700; color: var(--ink); font-size: 12px; }
-  .label-item span { color: var(--ink-soft); font-size: 11px; line-height: 1.4; }
+  const watch = (rid: string, c: string, r: Player) => {
+    unsubRef.current?.();
+    unsubRef.current = firebaseRooms.watch(rid, row => {
+      if (gone.current) return;
+      setRows(row.players || []);
+      if (row.status === 'playing') {
+        mockBackend.joinRoom(c);
+        onStart(r, c);
+      }
+    });
+  };
 
-  /* ── RULE BOXES ── */
-  .rules-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .rule-box {
-    background: var(--rule-box);
-    border: 1.5px solid rgba(200,140,20,0.35);
-    border-radius: 10px;
-    padding: 12px 14px;
-    position: relative;
-  }
-  .rule-box.foul {
-    border-color: rgba(192,57,43,0.4);
-    background: #fff8f6;
-  }
-  .rule-box.win {
-    border-color: rgba(212,172,13,0.5);
-    background: #fffbec;
-  }
-  .rule-icon { font-size: 22px; margin-bottom: 5px; display: block; }
-  .rule-title {
-    font-family: 'DM Sans', sans-serif;
-    font-weight: 700;
-    font-size: 12px;
-    color: var(--ink);
-    margin-bottom: 4px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .rule-desc {
-    font-size: 11.5px;
-    color: var(--ink-soft);
-    line-height: 1.5;
-  }
-  .rule-desc em { font-style: normal; font-weight: 600; color: var(--foul-red); }
-  .rule-desc strong { color: var(--wood-dark); }
+  const doCreate = async () => {
+    setBusy(true); setErr('');
+    try {
+      const row = await firebaseRooms.create({ gameId:'carrom', maxPlayers:2, host:me });
+      mockBackend.joinRoom(row.code);
+      setCode(row.code); setRowId(row.id); setMyRole('p1'); setRows(row.players);
+      watch(row.id, row.code, 'p1');
+      setView('wait');
+    } catch(e:any){ setErr(e?.message||'Error'); }
+    finally { setBusy(false); }
+  };
 
-  /* ── PLAYER DIAGRAMS ── */
-  .player-diagram {
-    display: flex; flex-direction: column; align-items: center; gap: 8px;
-    padding: 14px;
-    background: var(--rule-box);
-    border: 1.5px solid rgba(200,140,20,0.35);
-    border-radius: 12px;
-  }
-  .diagram-title {
-    font-family: 'Bebas Neue', sans-serif;
-    font-size: 17px; letter-spacing: 1.5px;
-    color: var(--wood-dark);
-  }
+  const doJoin = async () => {
+    const c = inp.trim().toUpperCase();
+    if (!c) return;
+    setBusy(true); setErr('');
+    try {
+      const row = await firebaseRooms.join(c, me);
+      const idx = (row.players||[]).findIndex((p:FbRoomPlayer)=>p.id===me.id);
+      const r: Player = idx <= 0 ? 'p1' : 'p2';
+      mockBackend.joinRoom(c);
+      setCode(c); setRowId(row.id); setMyRole(r); setRows(row.players);
+      watch(row.id, c, r);
+      setView('wait');
+    } catch(e:any){ setErr(e?.message||'Invalid code'); }
+    finally { setBusy(false); }
+  };
 
-  /* ── TURN FLOW DIAGRAM ── */
-  .turn-flow {
-    display: flex; align-items: center; gap: 0;
-    background: var(--rule-box);
-    border: 1.5px solid rgba(200,140,20,0.35);
-    border-radius: 12px;
-    padding: 16px;
-    overflow-x: auto;
-  }
-  .flow-step {
-    text-align: center;
-    flex: 1;
-    min-width: 90px;
-  }
-  .flow-bubble {
-    width: 58px; height: 58px; border-radius: 50%;
-    margin: 0 auto 6px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 20px;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.2);
-  }
-  .flow-label { font-size: 10.5px; font-weight: 600; color: var(--ink); line-height: 1.3; }
-  .flow-arrow {
-    font-size: 20px; color: var(--gold);
-    flex-shrink: 0;
-    padding: 0 4px;
-  }
-  .flow-outcome {
-    display: flex; flex-direction: column; gap: 6px;
-    flex: 1; min-width: 120px;
-  }
-  .outcome-yes, .outcome-no {
-    border-radius: 8px; padding: 6px 10px;
-    font-size: 10.5px; font-weight: 600;
-  }
-  .outcome-yes { background: #e8f8e8; border: 1px solid #5cb85c; color: #1a5c1a; }
-  .outcome-no  { background: #fdecea; border: 1px solid #e74c3c; color: #8b1a1a; }
+  const doStart = async () => {
+    setBusy(true);
+    try { await firebaseRooms.start(rowId, rows[0]?.id); }
+    catch(e:any){ setErr(e?.message||''); setBusy(false); }
+  };
 
-  /* ── QUEEN STEPS ── */
-  .queen-steps { display: flex; gap: 12px; align-items: flex-start; }
-  .qstep {
-    flex: 1;
-    background: var(--rule-box);
-    border: 1.5px solid rgba(200,140,20,0.3);
-    border-radius: 10px;
-    padding: 12px 10px;
-    text-align: center;
-    position: relative;
-  }
-  .qstep-num {
-    width: 22px; height: 22px; border-radius: 50%;
-    background: var(--gold);
-    color: var(--wood-dark);
-    font-weight: 700; font-size: 11px;
-    display: flex; align-items: center; justify-content: center;
-    margin: 0 auto 6px;
-  }
-  .qstep-icon { font-size: 26px; display: block; margin-bottom: 4px; }
-  .qstep-title { font-weight: 700; font-size: 11px; margin-bottom: 4px; color: var(--ink); }
-  .qstep-desc { font-size: 10.5px; color: var(--ink-soft); line-height: 1.4; }
-  .qstep-arrow {
-    font-size: 22px; color: var(--gold);
-    align-self: center; flex-shrink: 0;
-  }
-  .qstep.warning {
-    border-color: rgba(192,57,43,0.4);
-    background: #fff8f6;
-  }
-  .qstep.success {
-    border-color: rgba(80,180,80,0.4);
-    background: #f6fff6;
-  }
-
-  /* ── FOUL GRID ── */
-  .foul-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .foul-item {
-    background: #fff5f4;
-    border: 1.5px solid rgba(192,57,43,0.3);
-    border-radius: 10px;
-    padding: 12px 10px;
-    text-align: center;
-  }
-  .foul-icon { font-size: 26px; margin-bottom: 6px; display: block; }
-  .foul-name { font-weight: 700; font-size: 11px; color: #8b1a1a; margin-bottom: 3px; }
-  .foul-desc { font-size: 10px; color: #5a3030; line-height: 1.35; }
-  .foul-penalty {
-    margin-top: 5px;
-    font-size: 9.5px;
-    font-weight: 700;
-    color: #c0392b;
-    background: rgba(192,57,43,0.1);
-    border-radius: 4px;
-    padding: 2px 6px;
-    display: inline-block;
-  }
-
-  /* ── WINNING SECTION ── */
-  .win-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-  .win-step {
-    background: linear-gradient(135deg, #fffbec, #fff8da);
-    border: 2px solid rgba(212,172,13,0.45);
-    border-radius: 12px;
-    padding: 14px 12px;
-    text-align: center;
-  }
-  .win-step-num {
-    width: 26px; height: 26px; border-radius: 50%;
-    background: var(--gold);
-    color: var(--wood-dark);
-    font-weight: 900; font-size: 14px;
-    display: flex; align-items: center; justify-content: center;
-    margin: 0 auto 8px;
-  }
-  .win-step-icon { font-size: 30px; display: block; margin-bottom: 6px; }
-  .win-step-title { font-weight: 700; font-size: 12px; color: var(--ink); margin-bottom: 3px; }
-  .win-step-desc { font-size: 10.5px; color: var(--ink-soft); line-height: 1.4; }
-
-  .score-demo {
-    background: var(--wood-dark);
-    border-radius: 12px;
-    padding: 16px;
-    color: var(--cream);
-    display: flex; gap: 12px; align-items: center;
-  }
-  .score-title { font-family: 'Bebas Neue', sans-serif; font-size: 14px; letter-spacing: 2px; color: var(--gold); margin-bottom: 8px; }
-  .score-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 5px; }
-  .score-player { font-size: 11px; font-weight: 600; }
-  .score-bar-wrap { flex: 1; height: 10px; background: rgba(255,255,255,0.1); border-radius: 5px; overflow: hidden; }
-  .score-bar { height: 100%; border-radius: 5px; }
-  .score-pts { font-size: 12px; font-weight: 700; width: 22px; text-align: right; }
-
-  /* ── FOOTER ── */
-  .footer {
-    background: var(--wood-dark);
-    border-top: 3px solid var(--gold);
-    padding: 20px 40px;
-    text-align: center;
-  }
-  .footer-text {
-    font-family: 'Crimson Pro', serif;
-    font-size: 14px;
-    color: rgba(245,220,160,0.7);
-    font-style: italic;
-  }
-
-  /* ── SEATING DIAGRAMS ── */
-  .seat-container { display: flex; gap: 20px; flex-wrap: wrap; }
-  .seat-diagram { flex: 1; min-width: 200px; }
-
-  /* Responsive */
-  @media (max-width: 860px) {
-    .page { grid-template-columns: 1fr; }
-    .board-wrap { flex-direction: column; align-items: center; }
-    .rules-grid { grid-template-columns: 1fr; }
-    .foul-grid { grid-template-columns: 1fr 1fr; }
-    .win-grid { grid-template-columns: 1fr; }
-    .queen-steps { flex-wrap: wrap; }
-  }
-`;
-
-const CARROM_HTML = `
-
-<!-- ═══════════════════════════ HEADER ═══════════════════════════ -->
-<div class="header">
-  <div class="header-badge">OFFICIAL RULES &amp; VISUAL GUIDE</div>
-  <h1>CARROM <span>BOARD</span></h1>
-  <div class="header-sub">Complete Professional Gameplay Manual · 2-Player &amp; 4-Player Modes</div>
-  <div class="header-coins">
-    <div class="hcoin"><div class="hcoin-dot" style="background:#f0ede5; border:1px solid #aaa;"></div>9 White Coins</div>
-    <div class="hcoin"><div class="hcoin-dot" style="background:#1e1a2e; border:1px solid #555;"></div>9 Black Coins</div>
-    <div class="hcoin"><div class="hcoin-dot" style="background:#cc2222; border:1px solid #ff6060;"></div>1 Red Queen</div>
-    <div class="hcoin" style="background:rgba(232,160,32,0.15); border-color:rgba(232,160,32,0.4);">🎯 1 Striker</div>
-  </div>
-</div>
-
-<!-- ═══════════════════════════ PAGE ═══════════════════════════ -->
-<div class="page">
-
-  <!-- ══════════════ 1. BOARD SETUP ══════════════ -->
-  <div class="card full-width">
-    <div class="card-header">
-      <div class="card-num">1</div>
-      <div class="card-title">CARROM BOARD SETUP &amp; ANATOMY</div>
+  if (view==='main') return (
+    <div className="flex flex-col items-center justify-center h-full gap-5 p-8 bg-[#0c1118] text-white">
+      <button onClick={onBack} className="absolute top-5 left-5 text-gray-500 hover:text-white text-sm">← Back</button>
+      <Globe className="w-14 h-14 text-green-400" />
+      <h2 className="text-3xl font-black">Online Carrom</h2>
+      <button onClick={doCreate} disabled={busy}
+        className="w-full max-w-xs py-4 rounded-2xl bg-green-600 font-bold disabled:opacity-50 active:scale-95 transition">
+        {busy?'Creating…':'Create Room'}
+      </button>
+      <button onClick={()=>setView('join')}
+        className="w-full max-w-xs py-4 rounded-2xl bg-gray-800 border border-gray-700 font-bold active:scale-95 transition">
+        Join Room
+      </button>
+      {err && <p className="text-red-400 text-sm">{err}</p>}
     </div>
-    <div class="card-body">
-      <div class="board-wrap">
+  );
 
-        <!-- SVG Board -->
-        <div class="board-svg-container">
-          <svg width="360" height="360" viewBox="0 0 360 360" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-              <!-- Wood gradient -->
-              <radialGradient id="wood" cx="50%" cy="50%" r="70%">
-                <stop offset="0%" stop-color="#d4a820"/>
-                <stop offset="55%" stop-color="#b8860b"/>
-                <stop offset="100%" stop-color="#7c5a08"/>
-              </radialGradient>
-              <!-- Coin gradients -->
-              <radialGradient id="wCoin" cx="35%" cy="35%">
-                <stop offset="0%" stop-color="#ffffff"/>
-                <stop offset="100%" stop-color="#c8c8c8"/>
-              </radialGradient>
-              <radialGradient id="bCoin" cx="35%" cy="35%">
-                <stop offset="0%" stop-color="#4a4a70"/>
-                <stop offset="100%" stop-color="#0e0e20"/>
-              </radialGradient>
-              <radialGradient id="queen" cx="35%" cy="35%">
-                <stop offset="0%" stop-color="#ff7070"/>
-                <stop offset="100%" stop-color="#aa1a1a"/>
-              </radialGradient>
-              <radialGradient id="striker" cx="30%" cy="30%">
-                <stop offset="0%" stop-color="#d0d0ff"/>
-                <stop offset="100%" stop-color="#505080"/>
-              </radialGradient>
-              <radialGradient id="pocket" cx="40%" cy="40%">
-                <stop offset="0%" stop-color="#333"/>
-                <stop offset="100%" stop-color="#000"/>
-              </radialGradient>
-              <!-- Glow filter -->
-              <filter id="queenGlow">
-                <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="blur"/>
-                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-              </filter>
-              <filter id="softShadow">
-                <feDropShadow dx="1" dy="2" stdDeviation="2" flood-color="rgba(0,0,0,0.4)"/>
-              </filter>
-            </defs>
-
-            <!-- Board surface -->
-            <rect width="360" height="360" fill="url(#wood)" rx="8"/>
-            <!-- Wood grain lines -->
-            <g opacity="0.06" stroke="#000" stroke-width="1">
-              <line x1="0" y1="60" x2="360" y2="0"/>
-              <line x1="0" y1="120" x2="360" y2="60"/>
-              <line x1="0" y1="180" x2="360" y2="120"/>
-              <line x1="0" y1="240" x2="360" y2="180"/>
-              <line x1="0" y1="300" x2="360" y2="240"/>
-              <line x1="0" y1="360" x2="360" y2="300"/>
-            </g>
-
-            <!-- Outer frame border -->
-            <rect x="3" y="3" width="354" height="354" fill="none" stroke="#5c2a07" stroke-width="5" rx="7"/>
-            <!-- Playing area border -->
-            <rect x="36" y="36" width="288" height="288" fill="none" stroke="#6b3a10" stroke-width="2.5"/>
-            <rect x="39" y="39" width="282" height="282" fill="none" stroke="#8a5020" stroke-width="1"/>
-
-            <!-- Corner pockets -->
-            <circle cx="36" cy="36" r="18" fill="url(#pocket)"/>
-            <circle cx="324" cy="36" r="18" fill="url(#pocket)"/>
-            <circle cx="36" cy="324" r="18" fill="url(#pocket)"/>
-            <circle cx="324" cy="324" r="18" fill="url(#pocket)"/>
-            <!-- Pocket rings -->
-            <circle cx="36" cy="36" r="21" fill="none" stroke="#3d1a00" stroke-width="2"/>
-            <circle cx="324" cy="36" r="21" fill="none" stroke="#3d1a00" stroke-width="2"/>
-            <circle cx="36" cy="324" r="21" fill="none" stroke="#3d1a00" stroke-width="2"/>
-            <circle cx="324" cy="324" r="21" fill="none" stroke="#3d1a00" stroke-width="2"/>
-            <!-- Pocket labels -->
-            <text x="36" y="14" text-anchor="middle" font-size="8" fill="#f5cc60" font-weight="600">POCKET</text>
-            <text x="324" y="14" text-anchor="middle" font-size="8" fill="#f5cc60" font-weight="600">POCKET</text>
-            <text x="36" y="353" text-anchor="middle" font-size="8" fill="#f5cc60" font-weight="600">POCKET</text>
-            <text x="324" y="353" text-anchor="middle" font-size="8" fill="#f5cc60" font-weight="600">POCKET</text>
-
-            <!-- Center circles -->
-            <circle cx="180" cy="180" r="70" fill="none" stroke="rgba(100,60,10,0.4)" stroke-width="1.5"/>
-            <circle cx="180" cy="180" r="44" fill="none" stroke="rgba(100,60,10,0.4)" stroke-width="1.2"/>
-            <circle cx="180" cy="180" r="26" fill="none" stroke="rgba(100,60,10,0.45)" stroke-width="1"/>
-            <circle cx="180" cy="180" r="14" fill="none" stroke="rgba(100,60,10,0.45)" stroke-width="1"/>
-            <!-- Center dot -->
-            <circle cx="180" cy="180" r="5" fill="rgba(100,60,10,0.5)"/>
-
-            <!-- Diagonal lines -->
-            <line x1="180" y1="180" x2="62" y2="62" stroke="rgba(100,60,10,0.3)" stroke-width="1"/>
-            <line x1="180" y1="180" x2="298" y2="62" stroke="rgba(100,60,10,0.3)" stroke-width="1"/>
-            <line x1="180" y1="180" x2="62" y2="298" stroke="rgba(100,60,10,0.3)" stroke-width="1"/>
-            <line x1="180" y1="180" x2="298" y2="298" stroke="rgba(100,60,10,0.3)" stroke-width="1"/>
-
-            <!-- Baseline (P1 - bottom) -->
-            <line x1="60" y1="300" x2="300" y2="300" stroke="#d4921a" stroke-width="1.5" stroke-dasharray="5,5" opacity="0.8"/>
-            <!-- Baseline (P2 - top) -->
-            <line x1="60" y1="60" x2="300" y2="60" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="5,5" opacity="0.8"/>
-            <!-- Baseline (P3 - left) -->
-            <line x1="60" y1="60" x2="60" y2="300" stroke="#10b981" stroke-width="1.5" stroke-dasharray="5,5" opacity="0.8"/>
-            <!-- Baseline (P4 - right) -->
-            <line x1="300" y1="60" x2="300" y2="300" stroke="#a855f7" stroke-width="1.5" stroke-dasharray="5,5" opacity="0.8"/>
-
-            <!-- Striker circles (P1 bottom) -->
-            <circle cx="120" cy="308" r="8" fill="none" stroke="#d4921a" stroke-width="1.5" opacity="0.9"/>
-            <circle cx="180" cy="308" r="8" fill="none" stroke="#d4921a" stroke-width="1.5" opacity="0.9"/>
-            <circle cx="240" cy="308" r="8" fill="none" stroke="#d4921a" stroke-width="1.5" opacity="0.9"/>
-            <!-- Striker circles (P2 top) -->
-            <circle cx="120" cy="52" r="8" fill="none" stroke="#3b82f6" stroke-width="1.5" opacity="0.9"/>
-            <circle cx="180" cy="52" r="8" fill="none" stroke="#3b82f6" stroke-width="1.5" opacity="0.9"/>
-            <circle cx="240" cy="52" r="8" fill="none" stroke="#3b82f6" stroke-width="1.5" opacity="0.9"/>
-
-            <!-- ── COIN ARRANGEMENT ── -->
-            <!-- Outer ring: 12 coins, alternating black/white, r=52 -->
-            <!-- 0° = right, going clockwise. offset 15° -->
-            <!-- i=0 black, i=1 white, i=2 black ... -->
-            <!-- Positions: 15°, 45°, 75°, 105°, 135°, 165°, 195°, 225°, 255°, 285°, 315°, 345° -->
-            <g filter="url(#softShadow)">
-              <!-- Outer ring coins (12) -->
-              <!-- 15° -->
-              <circle cx="230.3" cy="166.5" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 45° -->
-              <circle cx="216.8" cy="143.2" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 75° -->
-              <circle cx="193.5" cy="127.7" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 105° -->
-              <circle cx="166.5" cy="127.7" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 135° -->
-              <circle cx="143.2" cy="143.2" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 165° -->
-              <circle cx="129.7" cy="166.5" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 195° -->
-              <circle cx="129.7" cy="193.5" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 225° -->
-              <circle cx="143.2" cy="216.8" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 255° -->
-              <circle cx="166.5" cy="230.3" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 285° -->
-              <circle cx="193.5" cy="230.3" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 315° -->
-              <circle cx="216.8" cy="216.8" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 345° -->
-              <circle cx="230.3" cy="193.5" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-
-              <!-- Inner ring coins (6), r=26, alternating w/b starting white -->
-              <!-- 0°=right: white -->
-              <circle cx="206" cy="180" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 60°: black -->
-              <circle cx="193" cy="157.4" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 120°: white -->
-              <circle cx="167" cy="157.4" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 180°: black -->
-              <circle cx="154" cy="180" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-              <!-- 240°: white -->
-              <circle cx="167" cy="202.6" r="10" fill="url(#wCoin)" stroke="#888" stroke-width="0.8"/>
-              <!-- 300°: black -->
-              <circle cx="193" cy="202.6" r="10" fill="url(#bCoin)" stroke="#000" stroke-width="0.8"/>
-
-              <!-- Queen at center -->
-              <circle cx="180" cy="180" r="10" fill="url(#queen)" stroke="#8b0000" stroke-width="1" filter="url(#queenGlow)"/>
-              <circle cx="180" cy="180" r="5" fill="#ffcc00"/>
-            </g>
-
-            <!-- Queen glow ring -->
-            <circle cx="180" cy="180" r="13" fill="none" stroke="#ff4444" stroke-width="1.5" opacity="0.5"/>
-
-            <!-- Coin labels -->
-            <text x="205" y="174" text-anchor="middle" font-size="7" fill="rgba(0,0,0,0.4)">W</text>
-            <text x="180" y="184" text-anchor="middle" font-size="7" fill="#ffcc00" font-weight="700">Q</text>
-
-            <!-- P1 Striker shown at bottom center -->
-            <circle cx="180" cy="310" r="13" fill="url(#striker)" stroke="#c0c0ff" stroke-width="1.5" filter="url(#softShadow)"/>
-            <text x="180" y="314" text-anchor="middle" font-size="8" fill="rgba(255,255,255,0.6)">S</text>
-            <text x="180" y="332" text-anchor="middle" font-size="9" fill="#d4921a" font-weight="600">STRIKER</text>
-
-            <!-- Player labels on sides -->
-            <!-- P1 bottom -->
-            <text x="180" y="354" text-anchor="middle" font-family="Bebas Neue, sans-serif" font-size="11" fill="#f5cc60" letter-spacing="1">PLAYER 1 · WHITE ⚪</text>
-            <!-- P2 top -->
-            <text x="180" y="27" text-anchor="middle" font-family="Bebas Neue, sans-serif" font-size="11" fill="#f5cc60" letter-spacing="1">PLAYER 2 · BLACK ⚫</text>
-
-            <!-- Arrow annotations -->
-            <!-- Center circle label -->
-            <line x1="180" y1="138" x2="180" y2="170" stroke="#e8a020" stroke-width="1" marker-end="url(#arr)"/>
-            <text x="180" y="133" text-anchor="middle" font-size="9" fill="#e8a020" font-weight="600">CENTER CIRCLE</text>
-
-            <!-- Queen label -->
-            <line x1="200" y1="168" x2="188" y2="178" stroke="#ff6666" stroke-width="1"/>
-            <text x="215" y="165" font-size="9" fill="#ff6666" font-weight="700">QUEEN👑</text>
-
-            <!-- Outer ring label -->
-            <text x="290" y="178" text-anchor="start" font-size="8" fill="#f5cc60">OUTER</text>
-            <text x="290" y="188" text-anchor="start" font-size="8" fill="#f5cc60">RING (12)</text>
-            <line x1="288" y1="183" x2="241" y2="183" stroke="#f5cc60" stroke-width="0.8" opacity="0.6"/>
-
-            <!-- Inner ring label -->
-            <text x="75" y="178" text-anchor="end" font-size="8" fill="#f5cc60">INNER</text>
-            <text x="75" y="188" text-anchor="end" font-size="8" fill="#f5cc60">RING (6)</text>
-            <line x1="77" y1="183" x2="156" y2="183" stroke="#f5cc60" stroke-width="0.8" opacity="0.6"/>
-          </svg>
-        </div>
-
-        <!-- Board Labels -->
-        <div class="board-labels">
-          <div class="label-item">
-            <div class="label-dot" style="background:#cc2222;"></div>
-            <div><strong>Red Queen (Centre)</strong><span>The most valuable piece. Must be pocketed AND covered to win. Worth 3 bonus points.</span></div>
-          </div>
-          <div class="label-item">
-            <div class="label-dot" style="background:#f0ede5; border:1px solid #999;"></div>
-            <div><strong>White Coins × 9</strong><span>Player 1 (2P) or Team A (P1+P3 in 4P) scores by pocketing these.</span></div>
-          </div>
-          <div class="label-item">
-            <div class="label-dot" style="background:#1e1a2e; border:1px solid #555;"></div>
-            <div><strong>Black Coins × 9</strong><span>Player 2 (2P) or Team B (P2+P4 in 4P) scores by pocketing these.</span></div>
-          </div>
-          <div class="label-item">
-            <div class="label-dot" style="background:#9090c0; border:1px solid #c0c0ff;"></div>
-            <div><strong>Striker</strong><span>The large disc used to hit coins into pockets. Must be placed in the striker circle on your baseline.</span></div>
-          </div>
-          <div class="label-item">
-            <div class="label-dot" style="background:#000;"></div>
-            <div><strong>Four Corner Pockets</strong><span>Circular holes at each corner where coins are scored. Striker pocketed = FOUL.</span></div>
-          </div>
-          <div class="label-item">
-            <div class="label-dot" style="background:#d4921a;"></div>
-            <div><strong>Baseline &amp; Striker Circles</strong><span>Dashed line on each side. Striker must touch or be behind the baseline before each shot.</span></div>
-          </div>
-          <div class="label-item">
-            <div class="label-dot" style="background:#8a5020;"></div>
-            <div><strong>Diagonal Lines</strong><span>Decorative lines from centre to near each pocket. Coins landing on diagonals are repositioned.</span></div>
-          </div>
-          <div class="label-item">
-            <div class="label-dot" style="background:#b8860b;"></div>
-            <div><strong>Centre Circles (4 rings)</strong><span>Starting arrangement zone. Coins set up in two concentric rings around the queen at game start.</span></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Coin arrangement explanation -->
-      <div style="margin-top:16px; background:linear-gradient(135deg,#fffbec,#fff6d0); border:2px solid rgba(200,140,20,0.4); border-radius:12px; padding:16px;">
-        <div style="font-family:'Bebas Neue',sans-serif; font-size:16px; letter-spacing:2px; color:var(--wood-dark); margin-bottom:10px;">📐 OFFICIAL COIN ARRANGEMENT</div>
-        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:12px; font-size:11.5px; color:var(--ink-soft);">
-          <div style="background:white; border-radius:8px; padding:10px; border:1px solid rgba(200,140,20,0.3);">
-            <strong style="color:var(--ink); display:block; margin-bottom:4px;">🎯 Centre</strong>
-            Red Queen placed exactly at the centre point of the board.
-          </div>
-          <div style="background:white; border-radius:8px; padding:10px; border:1px solid rgba(200,140,20,0.3);">
-            <strong style="color:var(--ink); display:block; margin-bottom:4px;">🔵 Inner Ring (6 coins)</strong>
-            Alternating White–Black, starting with White at top. 3 white + 3 black.
-          </div>
-          <div style="background:white; border-radius:8px; padding:10px; border:1px solid rgba(200,140,20,0.3);">
-            <strong style="color:var(--ink); display:block; margin-bottom:4px;">⭕ Outer Ring (12 coins)</strong>
-            Alternating Black–White. 6 white + 6 black. Total: 9W + 9B + 1Q = 19 pieces.
-          </div>
-        </div>
-      </div>
+  if (view==='join') return (
+    <div className="flex flex-col items-center justify-center h-full gap-5 p-8 bg-[#0c1118] text-white">
+      <button onClick={()=>setView('main')} className="absolute top-5 left-5 text-gray-500 hover:text-white text-sm">← Back</button>
+      <h2 className="text-2xl font-black">Room Code</h2>
+      <input value={inp} onChange={e=>setInp(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6))}
+        placeholder="ABC123" autoFocus
+        className="w-full max-w-xs bg-gray-900 border border-gray-700 rounded-2xl px-4 py-5 text-center text-4xl font-black tracking-widest" />
+      {err && <p className="text-red-400 text-sm">{err}</p>}
+      <button onClick={doJoin} disabled={busy||inp.length<4}
+        className="w-full max-w-xs bg-indigo-600 font-bold py-4 rounded-xl disabled:opacity-50 active:scale-95 transition">
+        {busy?'Joining…':'Join'}
+      </button>
     </div>
-  </div>
-
-  <!-- ══════════════ 2. 2-PLAYER RULES ══════════════ -->
-  <div class="card">
-    <div class="card-header">
-      <div class="card-num">2</div>
-      <div class="card-title">2-PLAYER MODE</div>
-    </div>
-    <div class="card-body">
-
-      <!-- Seating diagram -->
-      <div class="player-diagram" style="margin-bottom:14px;">
-        <div class="diagram-title">SEATING &amp; SIDES</div>
-        <svg width="200" height="200" viewBox="0 0 200 200">
-          <!-- Board -->
-          <rect x="40" y="40" width="120" height="120" fill="#b8860b" rx="6" stroke="#6b3a10" stroke-width="2"/>
-          <rect x="50" y="50" width="100" height="100" fill="#c89a0c" rx="3" opacity="0.6"/>
-          <!-- Pockets -->
-          <circle cx="40" cy="40" r="7" fill="#111"/>
-          <circle cx="160" cy="40" r="7" fill="#111"/>
-          <circle cx="40" cy="160" r="7" fill="#111"/>
-          <circle cx="160" cy="160" r="7" fill="#111"/>
-          <!-- Centre -->
-          <circle cx="100" cy="100" r="4" fill="#cc2222"/>
-
-          <!-- P1 bottom -->
-          <rect x="60" y="173" width="80" height="20" fill="#f59e0b" rx="4"/>
-          <text x="100" y="187" text-anchor="middle" font-size="10" fill="white" font-weight="700">PLAYER 1 · WHITE</text>
-          <!-- P2 top -->
-          <rect x="60" y="7" width="80" height="20" fill="#3b82f6" rx="4"/>
-          <text x="100" y="21" text-anchor="middle" font-size="10" fill="white" font-weight="700">PLAYER 2 · BLACK</text>
-
-          <!-- Arrows between players -->
-          <path d="M 100 165 L 100 155" stroke="#f59e0b" stroke-width="2" marker-end="url(#arr2)"/>
-          <path d="M 100 45 L 100 35" stroke="#3b82f6" stroke-width="2" marker-end="url(#arr3)"/>
-
-          <!-- Baselines -->
-          <line x1="52" y1="163" x2="148" y2="163" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,3"/>
-          <line x1="52" y1="47" x2="148" y2="47" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="4,3"/>
-
-          <!-- Turn flow arrows -->
-          <path d="M 148 120 Q 175 100 148 80" stroke="#e8a020" stroke-width="1.5" fill="none" stroke-dasharray="3,3"/>
-          <text x="182" y="103" text-anchor="middle" font-size="8" fill="#e8a020">TURNS</text>
-          <text x="182" y="113" text-anchor="middle" font-size="8" fill="#e8a020">ALTERNATE</text>
-
-          <defs>
-            <marker id="arr2" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
-              <path d="M0,0 L6,3 L0,6 Z" fill="#f59e0b"/>
-            </marker>
-            <marker id="arr3" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
-              <path d="M0,0 L6,3 L0,6 Z" fill="#3b82f6"/>
-            </marker>
-          </defs>
-        </svg>
-        <div style="font-size:10.5px; color:var(--ink-soft); text-align:center; max-width:200px;">Players sit on opposite sides. P1 uses White ⚪, P2 uses Black ⚫. Coin color is fixed throughout the game.</div>
-      </div>
-
-      <!-- 2P Rules -->
-      <div class="rules-grid">
-        <div class="rule-box">
-          <span class="rule-icon">🎯</span>
-          <div class="rule-title">Pocket Own Coin → Extra Turn</div>
-          <div class="rule-desc">If you pocket <strong>your own colour</strong> coin, you score 1 point and get to <em>shoot again</em> immediately. Chain multiple coins for extra turns!</div>
-        </div>
-        <div class="rule-box">
-          <span class="rule-icon">❌</span>
-          <div class="rule-title">Miss / No Pocket → Pass Turn</div>
-          <div class="rule-desc">If the striker hits coins but nothing is pocketed, or only the striker moves, your turn <em>ends immediately</em> and the opponent takes their turn.</div>
-        </div>
-        <div class="rule-box foul">
-          <span class="rule-icon">⚠️</span>
-          <div class="rule-title">Wrong Coin Penalty</div>
-          <div class="rule-desc">Pocket <em>opponent's colour</em> coin = FOUL! That coin immediately returns to the board (near centre). Turn passes to opponent.</div>
-        </div>
-        <div class="rule-box foul">
-          <span class="rule-icon">🚫</span>
-          <div class="rule-title">Striker Foul</div>
-          <div class="rule-desc">If the <em>striker falls into a pocket</em>, it's a foul. One of your pocketed coins returns to the board as penalty. Turn passes.</div>
-        </div>
-      </div>
-
-      <div style="margin-top:12px; background:linear-gradient(90deg,#fff8e8,#fffbf0); border-left:4px solid var(--gold); border-radius:0 8px 8px 0; padding:10px 14px; font-size:11.5px; color:var(--ink-soft);">
-        <strong style="color:var(--ink);">🏆 Objective:</strong> Be the first player to pocket all 9 of your coins AND successfully cover the Queen. Toss to decide who plays first.
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════ 3. 4-PLAYER RULES ══════════════ -->
-  <div class="card">
-    <div class="card-header">
-      <div class="card-num">3</div>
-      <div class="card-title">4-PLAYER MODE</div>
-    </div>
-    <div class="card-body">
-
-      <!-- 4P seating diagram -->
-      <div class="player-diagram" style="margin-bottom:14px;">
-        <div class="diagram-title">SEATING, TEAMS &amp; TURN ORDER</div>
-        <svg width="220" height="220" viewBox="0 0 220 220">
-          <!-- Board -->
-          <rect x="50" y="50" width="120" height="120" fill="#b8860b" rx="6" stroke="#6b3a10" stroke-width="2"/>
-          <!-- Pockets -->
-          <circle cx="50" cy="50" r="7" fill="#111"/>
-          <circle cx="170" cy="50" r="7" fill="#111"/>
-          <circle cx="50" cy="170" r="7" fill="#111"/>
-          <circle cx="170" cy="170" r="7" fill="#111"/>
-          <!-- Centre -->
-          <circle cx="110" cy="110" r="4" fill="#cc2222"/>
-
-          <!-- TEAM A: P1 (bottom) + P3 (left) = WHITE -->
-          <!-- P1 bottom -->
-          <rect x="65" y="182" width="90" height="22" fill="#f59e0b" rx="4"/>
-          <text x="110" y="197" text-anchor="middle" font-size="9.5" fill="white" font-weight="700">P1 · WHITE ⚪ (Team A)</text>
-          <!-- P3 left -->
-          <rect x="2" y="96" width="22" height="28" fill="#10b981" rx="4" transform="rotate(0)"/>
-          <text x="13" y="108" text-anchor="middle" font-size="7" fill="white" font-weight="700" transform="rotate(-90,13,110)">P3·W·A</text>
-
-          <!-- TEAM B: P2 (top) + P4 (right) = BLACK -->
-          <!-- P2 top -->
-          <rect x="65" y="16" width="90" height="22" fill="#3b82f6" rx="4"/>
-          <text x="110" y="31" text-anchor="middle" font-size="9.5" fill="white" font-weight="700">P2 · BLACK ⚫ (Team B)</text>
-          <!-- P4 right -->
-          <rect x="196" y="96" width="22" height="28" fill="#a855f7" rx="4"/>
-          <text x="207" y="108" text-anchor="middle" font-size="7" fill="white" font-weight="700" transform="rotate(90,207,110)">P4·B·B</text>
-
-          <!-- Clockwise arrows -->
-          <path d="M 110 172 L 110 160" stroke="#f59e0b" stroke-width="1.5" fill="none" marker-end="url(#arrY)"/>
-          <path d="M 60 110 L 72 110" stroke="#10b981" stroke-width="1.5" fill="none" marker-end="url(#arrG)"/>
-          <path d="M 110 60 L 110 72" stroke="#3b82f6" stroke-width="1.5" fill="none" marker-end="url(#arrB)"/>
-          <path d="M 160 110 L 148 110" stroke="#a855f7" stroke-width="1.5" fill="none" marker-end="url(#arrP)"/>
-
-          <!-- Turn rotation circle -->
-          <path d="M 110 42 A 68 68 0 1 0 42 110" fill="none" stroke="#e8a020" stroke-width="2" stroke-dasharray="5,4" opacity="0.7"/>
-          <polygon points="42,110 36,104 48,102" fill="#e8a020" opacity="0.7"/>
-          <text x="154" y="44" font-size="9" fill="#e8a020" font-weight="700">CLOCKWISE</text>
-
-          <!-- Team A & B badges -->
-          <rect x="92" y="82" width="36" height="14" fill="#f59e0b" rx="3" opacity="0.85"/>
-          <text x="110" y="92" text-anchor="middle" font-size="8.5" fill="white" font-weight="700">TEAM A</text>
-          <rect x="92" y="100" width="36" height="14" fill="#3b82f6" rx="3" opacity="0.85"/>
-          <text x="110" y="110" text-anchor="middle" font-size="8.5" fill="white" font-weight="700">TEAM B</text>
-
-          <defs>
-            <marker id="arrY" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#f59e0b"/></marker>
-            <marker id="arrG" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#10b981"/></marker>
-            <marker id="arrB" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#3b82f6"/></marker>
-            <marker id="arrP" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#a855f7"/></marker>
-          </defs>
-        </svg>
-      </div>
-
-      <!-- 4P Rules -->
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;">
-        <div style="background:#fff8ec; border:1.5px solid rgba(245,158,11,0.4); border-radius:10px; padding:12px;">
-          <div style="font-weight:700; font-size:11px; color:#92400e; margin-bottom:5px; text-transform:uppercase;">🟡 Team A (White)</div>
-          <div style="font-size:10.5px; color:var(--ink-soft); line-height:1.5;">
-            <b>Player 1</b> — sits at bottom<br>
-            <b>Player 3</b> — sits at left side<br>
-            Both pocket White coins ⚪<br>
-            Opposite sides, shared score
-          </div>
-        </div>
-        <div style="background:#eff6ff; border:1.5px solid rgba(59,130,246,0.4); border-radius:10px; padding:12px;">
-          <div style="font-weight:700; font-size:11px; color:#1e3a5f; margin-bottom:5px; text-transform:uppercase;">🔵 Team B (Black)</div>
-          <div style="font-size:10.5px; color:var(--ink-soft); line-height:1.5;">
-            <b>Player 2</b> — sits at top<br>
-            <b>Player 4</b> — sits at right side<br>
-            Both pocket Black coins ⚫<br>
-            Opposite sides, shared score
-          </div>
-        </div>
-      </div>
-
-      <div class="rules-grid">
-        <div class="rule-box">
-          <span class="rule-icon">🔄</span>
-          <div class="rule-title">Clockwise Turn Order</div>
-          <div class="rule-desc">Order: <strong>P1 → P4 → P2 → P3 → P1…</strong> (clockwise around the board). If a player is disqualified, skip them.</div>
-        </div>
-        <div class="rule-box">
-          <span class="rule-icon">🤝</span>
-          <div class="rule-title">Teammate Strategy</div>
-          <div class="rule-desc">You can help set up shots for your partner. Pocket your colour to continue. If you accidentally pocket partner's coin — it still counts for your team!</div>
-        </div>
-        <div class="rule-box foul">
-          <span class="rule-icon">🚫</span>
-          <div class="rule-title">Pocketing Opponents</div>
-          <div class="rule-desc">Pocketing the <em>enemy team's coin</em> returns that coin to the board near centre. Your turn ends immediately.</div>
-        </div>
-        <div class="rule-box">
-          <span class="rule-icon">🏆</span>
-          <div class="rule-title">Team Wins Together</div>
-          <div class="rule-desc">Either teammate can pocket all team coins. The team wins when all <strong>9 of their colour</strong> are pocketed AND queen is covered.</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════ 4. QUEEN RULES ══════════════ -->
-  <div class="card full-width">
-    <div class="card-header">
-      <div class="card-num" style="background:#cc2222; color:white;">👑</div>
-      <div class="card-title">QUEEN RULES — THE MOST IMPORTANT RULE</div>
-    </div>
-    <div class="card-body">
-
-      <div style="display:grid; grid-template-columns:1fr 2fr; gap:20px; align-items:start;">
-
-        <!-- Queen visual -->
-        <div style="text-align:center;">
-          <svg width="180" height="180" viewBox="0 0 180 180" style="display:block; margin:0 auto;">
-            <defs>
-              <radialGradient id="qrd" cx="35%" cy="35%">
-                <stop offset="0%" stop-color="#ff7070"/>
-                <stop offset="100%" stop-color="#aa1a1a"/>
-              </radialGradient>
-              <filter id="qglow2">
-                <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur"/>
-                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-              </filter>
-            </defs>
-            <!-- Board bg -->
-            <rect width="180" height="180" fill="#c89a0c" rx="10" opacity="0.3"/>
-            <!-- Glow circles -->
-            <circle cx="90" cy="90" r="60" fill="none" stroke="#ff4444" stroke-width="1" opacity="0.3"/>
-            <circle cx="90" cy="90" r="44" fill="none" stroke="#ff4444" stroke-width="1" opacity="0.4"/>
-            <circle cx="90" cy="90" r="30" fill="none" stroke="#ff4444" stroke-width="1.5" opacity="0.5"/>
-            <!-- Queen coin -->
-            <circle cx="90" cy="90" r="22" fill="url(#qrd)" filter="url(#qglow2)" stroke="#8b0000" stroke-width="1.5"/>
-            <circle cx="90" cy="90" r="10" fill="#ffcc00"/>
-            <!-- Crown symbol -->
-            <text x="90" y="95" text-anchor="middle" font-size="14" fill="#aa1a1a">♛</text>
-            <!-- Red aura pulses -->
-            <circle cx="90" cy="90" r="26" fill="none" stroke="#ff3333" stroke-width="2" opacity="0.6"/>
-            <!-- Label -->
-            <text x="90" y="130" text-anchor="middle" font-family="Bebas Neue,sans-serif" font-size="16" fill="#ff4444" letter-spacing="2">RED QUEEN</text>
-            <text x="90" y="145" text-anchor="middle" font-size="10" fill="var(--ink-soft)">+3 Bonus Points</text>
-            <text x="90" y="158" text-anchor="middle" font-size="10" fill="var(--ink-soft)">Must be Covered to Win</text>
-          </svg>
-        </div>
-
-        <!-- Queen steps -->
-        <div>
-          <div style="font-family:'Bebas Neue',sans-serif; font-size:15px; letter-spacing:2px; color:var(--wood-dark); margin-bottom:12px;">STEP-BY-STEP QUEEN SEQUENCE</div>
-          <div class="queen-steps">
-            <div class="qstep">
-              <div class="qstep-num">1</div>
-              <span class="qstep-icon">👑</span>
-              <div class="qstep-title">Pocket the Queen</div>
-              <div class="qstep-desc">Strike the red queen into any corner pocket at any point during your turn. This can be before, after, or along with your own coins.</div>
-            </div>
-            <div class="qstep-arrow">→</div>
-            <div class="qstep success">
-              <div class="qstep-num">2</div>
-              <span class="qstep-icon">⚪</span>
-              <div class="qstep-title">Cover the Queen</div>
-              <div class="qstep-desc">On the SAME shot or the very next shot, pocket at least one of YOUR OWN colour coins. This "covers" the queen — it's now yours permanently!</div>
-            </div>
-            <div class="qstep-arrow">→</div>
-            <div class="qstep warning">
-              <div class="qstep-num">2B</div>
-              <span class="qstep-icon">🔄</span>
-              <div class="qstep-title">Failed Cover = Queen Returns</div>
-              <div class="qstep-desc">If you CANNOT pocket your own coin in the next shot after queening, the queen returns to the centre. You must try again later!</div>
-            </div>
-          </div>
-
-          <div style="margin-top:14px; display:grid; grid-template-columns:1fr 1fr; gap:10px;">
-            <div style="background:#f6fff6; border:1.5px solid rgba(80,160,80,0.4); border-radius:10px; padding:12px;">
-              <div style="font-weight:700; font-size:11px; color:#1a5c1a; margin-bottom:5px; text-transform:uppercase;">✅ Queen Successfully Covered</div>
-              <ul style="font-size:10.5px; color:var(--ink-soft); line-height:1.6; padding-left:14px;">
-                <li>Queen stays pocketed permanently</li>
-                <li>You earn <strong>+3 bonus points</strong></li>
-                <li>Now only need to clear your remaining coins</li>
-                <li>If all your coins are already gone — you WIN now!</li>
-              </ul>
-            </div>
-            <div style="background:#fff8f6; border:1.5px solid rgba(192,57,43,0.3); border-radius:10px; padding:12px;">
-              <div style="font-weight:700; font-size:11px; color:#8b1a1a; margin-bottom:5px; text-transform:uppercase;">⚠️ Special Queen Rule</div>
-              <ul style="font-size:10.5px; color:var(--ink-soft); line-height:1.6; padding-left:14px;">
-                <li>You can't win without covering the queen</li>
-                <li>The queen can be pocketed by ANY player</li>
-                <li>But only the one who covers it scores the bonus</li>
-                <li>If you pocket all coins without the queen → queen must still be covered!</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════ 5. FOULS & PENALTIES ══════════════ -->
-  <div class="card">
-    <div class="card-header">
-      <div class="card-num" style="background:#c0392b; color:white;">⚠</div>
-      <div class="card-title">FOULS &amp; PENALTIES</div>
-    </div>
-    <div class="card-body">
-      <div class="foul-grid">
-        <div class="foul-item">
-          <span class="foul-icon">🕳️</span>
-          <div class="foul-name">Striker in Pocket</div>
-          <div class="foul-desc">The striker falls into any corner pocket during or after a shot.</div>
-          <div class="foul-penalty">📌 One own pocketed coin returns to centre</div>
-        </div>
-        <div class="foul-item">
-          <span class="foul-icon">🖐️</span>
-          <div class="foul-name">Touching Coins by Hand</div>
-          <div class="foul-desc">Repositioning, touching, or moving any coin or the striker by hand (except when permitted).</div>
-          <div class="foul-penalty">📌 Turn passes. Coin returned.</div>
-        </div>
-        <div class="foul-item">
-          <span class="foul-icon">🔁</span>
-          <div class="foul-name">Illegal Double Hit</div>
-          <div class="foul-desc">The striker hitting the same coin twice in one shot (double touch/double hit).</div>
-          <div class="foul-penalty">📌 Turn ends immediately</div>
-        </div>
-        <div class="foul-item">
-          <span class="foul-icon">🚫</span>
-          <div class="foul-name">Pocket Opponent Coin</div>
-          <div class="foul-desc">Deliberately or accidentally pocketing the opponent's colour coin.</div>
-          <div class="foul-penalty">📌 That coin returns near centre. Turn passes.</div>
-        </div>
-        <div class="foul-item">
-          <span class="foul-icon">⏱️</span>
-          <div class="foul-name">Time Violation</div>
-          <div class="foul-desc">Taking more than the allowed time (25 seconds) to complete a shot in timed formats.</div>
-          <div class="foul-penalty">📌 Own coin returns + turn passes</div>
-        </div>
-        <div class="foul-item">
-          <span class="foul-icon">📐</span>
-          <div class="foul-name">Wrong Striker Position</div>
-          <div class="foul-desc">Placing striker outside the baseline area or not touching/crossing the baseline.</div>
-          <div class="foul-penalty">📌 Re-place correctly or turn forfeited</div>
-        </div>
-      </div>
-
-      <!-- 3 Fouls rule -->
-      <div style="margin-top:14px; background:linear-gradient(135deg,#ffe0dc,#ffeae8); border:2px solid rgba(192,57,43,0.4); border-radius:12px; padding:14px;">
-        <div style="font-family:'Bebas Neue',sans-serif; font-size:15px; letter-spacing:2px; color:#8b1a1a; margin-bottom:8px;">⚡ 3 CONSECUTIVE FOULS = HEAVY PENALTY</div>
-        <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
-          <div style="display:flex; gap:6px;">
-            <div style="width:28px; height:28px; border-radius:50%; background:#c0392b; color:white; font-weight:900; display:flex; align-items:center; justify-content:center; font-size:14px;">1</div>
-            <div style="width:28px; height:28px; border-radius:50%; background:#c0392b; color:white; font-weight:900; display:flex; align-items:center; justify-content:center; font-size:14px;">2</div>
-            <div style="width:28px; height:28px; border-radius:50%; background:#8b1a1a; color:white; font-weight:900; display:flex; align-items:center; justify-content:center; font-size:14px;">3</div>
-          </div>
-          <div style="font-size:20px;">→</div>
-          <div style="font-size:24px; font-weight:900; color:#8b1a1a;">−5 POINTS</div>
-          <div style="font-size:11px; color:#5a3030; flex:1; min-width:120px;">Three fouls in a row (no successful shot between them) results in a 5-point deduction and the foul counter resets. This is separate from individual foul penalties.</div>
-        </div>
-      </div>
-
-      <!-- Penalty return visual -->
-      <div style="margin-top:12px; background:var(--rule-box); border:1.5px solid rgba(200,140,20,0.3); border-radius:10px; padding:12px;">
-        <div style="font-weight:700; font-size:11px; color:var(--ink); margin-bottom:6px; text-transform:uppercase;">♻️ Penalty Coin Return to Board</div>
-        <div style="display:flex; gap:10px; align-items:center; font-size:10.5px; color:var(--ink-soft);">
-          <div style="text-align:center;">
-            <div style="font-size:18px; margin-bottom:2px;">🕳️</div>
-            <div>Coin in pocket</div>
-          </div>
-          <div style="font-size:18px; color:var(--gold);">→</div>
-          <div style="text-align:center;">
-            <div style="font-size:18px; margin-bottom:2px;">⚠️</div>
-            <div>Foul occurs</div>
-          </div>
-          <div style="font-size:18px; color:var(--gold);">→</div>
-          <div style="text-align:center;">
-            <div style="font-size:18px; margin-bottom:2px;">🎯</div>
-            <div>Coin placed back near centre circle on the board</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════ 6. TURN RULES ══════════════ -->
-  <div class="card">
-    <div class="card-header">
-      <div class="card-num">6</div>
-      <div class="card-title">TURN RULES &amp; FLOW</div>
-    </div>
-    <div class="card-body">
-
-      <!-- Big turn flow diagram -->
-      <div style="background:linear-gradient(135deg,#fffbec,#fff6d0); border:2px solid rgba(200,140,20,0.4); border-radius:14px; padding:16px; margin-bottom:14px;">
-        <div style="font-family:'Bebas Neue',sans-serif; font-size:15px; letter-spacing:2px; color:var(--wood-dark); margin-bottom:12px; text-align:center;">TURN SEQUENCE FLOWCHART</div>
-
-        <div style="display:flex; align-items:center; gap:4px; overflow-x:auto; justify-content:center; flex-wrap:wrap; gap:8px;">
-          <!-- Step 1 -->
-          <div style="text-align:center; min-width:80px;">
-            <div style="width:56px; height:56px; border-radius:50%; background:linear-gradient(135deg,#f59e0b,#d97706); margin:0 auto 5px; display:flex; align-items:center; justify-content:center; font-size:22px; box-shadow:0 3px 10px rgba(0,0,0,0.2);">🎯</div>
-            <div style="font-size:9.5px; font-weight:600; color:var(--ink);">Place Striker<br>on Baseline</div>
-          </div>
-          <div style="font-size:20px; color:var(--gold);">→</div>
-
-          <!-- Step 2 -->
-          <div style="text-align:center; min-width:80px;">
-            <div style="width:56px; height:56px; border-radius:50%; background:linear-gradient(135deg,#3b82f6,#2563eb); margin:0 auto 5px; display:flex; align-items:center; justify-content:center; font-size:22px; box-shadow:0 3px 10px rgba(0,0,0,0.2);">💥</div>
-            <div style="font-size:9.5px; font-weight:600; color:var(--ink);">Flick / Shoot<br>Striker</div>
-          </div>
-          <div style="font-size:20px; color:var(--gold);">→</div>
-
-          <!-- Decision -->
-          <div style="text-align:center; min-width:90px;">
-            <div style="width:64px; height:64px; background:white; border:2px solid var(--gold); border-radius:8px; transform:rotate(45deg); margin:0 auto 5px; display:flex; align-items:center; justify-content:center; box-shadow:0 3px 10px rgba(0,0,0,0.15);">
-              <span style="transform:rotate(-45deg); font-size:18px;">🎲</span>
-            </div>
-            <div style="font-size:9.5px; font-weight:700; color:var(--ink);">Result?</div>
-          </div>
-
-          <!-- Outcomes -->
-          <div style="display:flex; flex-direction:column; gap:8px; min-width:120px;">
-            <div style="background:#e8f8e8; border:1.5px solid #5cb85c; border-radius:8px; padding:7px 10px; font-size:10px; font-weight:600; color:#1a5c1a;">
-              ✅ Own coin pocketed<br>
-              <span style="font-weight:400; font-size:9.5px;">Score +1 · Shoot Again!</span>
-            </div>
-            <div style="background:#fff3cd; border:1.5px solid #e6ac00; border-radius:8px; padding:7px 10px; font-size:10px; font-weight:600; color:#7a5700;">
-              👑 Queen pocketed<br>
-              <span style="font-weight:400; font-size:9.5px;">Cover next shot or queen returns</span>
-            </div>
-            <div style="background:#fdecea; border:1.5px solid #e74c3c; border-radius:8px; padding:7px 10px; font-size:10px; font-weight:600; color:#8b1a1a;">
-              ❌ Miss / Foul / Wrong coin<br>
-              <span style="font-weight:400; font-size:9.5px;">Turn passes to next player</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Specific rules -->
-      <div class="rules-grid">
-        <div class="rule-box">
-          <span class="rule-icon">🔗</span>
-          <div class="rule-title">Chain Shots</div>
-          <div class="rule-desc">You can pocket multiple own coins in one shot. Each counts as +1 point. You keep shooting as long as you score!</div>
-        </div>
-        <div class="rule-box">
-          <span class="rule-icon">👁️</span>
-          <div class="rule-title">Striker Must Cross Baseline</div>
-          <div class="rule-desc">The striker must be placed ON or within the baseline area. It must cross the centre line during the shot — no shooting sideways along the baseline.</div>
-        </div>
-        <div class="rule-box">
-          <span class="rule-icon">↩️</span>
-          <div class="rule-title">Rebounding Striker</div>
-          <div class="rule-desc">The striker may bounce off walls and other coins — this is legal. Coins pocketed by rebound still count.</div>
-        </div>
-        <div class="rule-box">
-          <span class="rule-icon">🔀</span>
-          <div class="rule-title">4P: Same Turn Logic</div>
-          <div class="rule-desc">In 4-player, same rules apply per turn. Your partner cannot help you physically. Turns rotate clockwise regardless of team.</div>
-        </div>
-      </div>
-
-      <!-- 2P vs 4P comparison -->
-      <div style="margin-top:12px; background:var(--rule-box); border:1.5px solid rgba(200,140,20,0.3); border-radius:10px; padding:12px;">
-        <div style="font-weight:700; font-size:11px; color:var(--ink); margin-bottom:8px; text-transform:uppercase;">🔄 2P vs 4P Turn Order Comparison</div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:10.5px; color:var(--ink-soft);">
-          <div>
-            <strong style="color:var(--ink);">2-Player:</strong><br>
-            P1 → P2 → P1 → P2…<br>
-            Simple back-and-forth alternation.<br>
-            Each player controls ALL their coins alone.
-          </div>
-          <div>
-            <strong style="color:var(--ink);">4-Player:</strong><br>
-            P1 → P4 → P2 → P3 → P1…<br>
-            Clockwise rotation. Teammates separated.<br>
-            You support your partner by setting up shots.
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════ 7. WINNING RULES ══════════════ -->
-  <div class="card full-width">
-    <div class="card-header">
-      <div class="card-num" style="background:var(--win-gold); color:#1a0e00;">🏆</div>
-      <div class="card-title">WINNING THE GAME</div>
-    </div>
-    <div class="card-body">
-
-      <div style="display:grid; grid-template-columns:2fr 1fr; gap:24px; align-items:start;">
-        <div>
-          <div class="win-grid">
-            <div class="win-step">
-              <div class="win-step-num">1</div>
-              <span class="win-step-icon">⚪⚫</span>
-              <div class="win-step-title">Clear All Your Coins</div>
-              <div class="win-step-desc">Pocket all 9 of your team's colour coins (White or Black) into any of the four corner pockets.</div>
-            </div>
-            <div class="win-step">
-              <div class="win-step-num">2</div>
-              <span class="win-step-icon">👑</span>
-              <div class="win-step-title">Cover the Queen</div>
-              <div class="win-step-desc">The red queen must be pocketed AND covered with your own coin before or during clearing all your coins.</div>
-            </div>
-            <div class="win-step">
-              <div class="win-step-num">3</div>
-              <span class="win-step-icon">🎉</span>
-              <div class="win-step-title">Declare Victory</div>
-              <div class="win-step-desc">Both conditions met = you win the board! Earn your score points. Best of 3 or 5 boards determines the match winner.</div>
-            </div>
-          </div>
-
-          <!-- Edge cases -->
-          <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:10px;">
-            <div style="background:#fff8ec; border:1.5px solid rgba(245,158,11,0.4); border-radius:10px; padding:12px; font-size:10.5px; color:var(--ink-soft);">
-              <div style="font-weight:700; color:var(--ink); margin-bottom:4px; font-size:11px;">⚡ Last Coin + Queen</div>
-              If you pocket your last own coin AND the queen in the same shot — you must still cover the queen. If you can't, the queen returns.
-            </div>
-            <div style="background:#fff8ec; border:1.5px solid rgba(245,158,11,0.4); border-radius:10px; padding:12px; font-size:10.5px; color:var(--ink-soft);">
-              <div style="font-weight:700; color:var(--ink); margin-bottom:4px; font-size:11px;">🤝 4P Team Win</div>
-              Either teammate clearing all coins + queen covered = Team wins together. Both players' scores are combined for the team total.
-            </div>
-            <div style="background:#fff8ec; border:1.5px solid rgba(245,158,11,0.4); border-radius:10px; padding:12px; font-size:10.5px; color:var(--ink-soft);">
-              <div style="font-weight:700; color:var(--ink); margin-bottom:4px; font-size:11px;">🎯 Score Calculation</div>
-              1 point per coin pocketed + 3 bonus for queen cover. Scores carry across boards in multi-board matches.
-            </div>
-          </div>
-        </div>
-
-        <!-- Score demo -->
-        <div>
-          <div class="score-demo">
-            <div style="flex:1;">
-              <div class="score-title">SAMPLE SCOREBOARD</div>
-              <div class="score-row">
-                <div class="score-player" style="color:#f59e0b;">P1 ⚪ White</div>
-                <div class="score-bar-wrap"><div class="score-bar" style="width:90%; background:linear-gradient(90deg,#f59e0b,#fbbf24);"></div></div>
-                <div class="score-pts" style="color:#f59e0b;">9</div>
-              </div>
-              <div style="font-size:9px; color:rgba(255,255,255,0.5); margin:-3px 0 5px; text-align:right;">+3 Queen cover = 12 pts</div>
-              <div class="score-row">
-                <div class="score-player" style="color:#3b82f6;">P2 ⚫ Black</div>
-                <div class="score-bar-wrap"><div class="score-bar" style="width:50%; background:linear-gradient(90deg,#3b82f6,#60a5fa);"></div></div>
-                <div class="score-pts" style="color:#3b82f6;">5</div>
-              </div>
-              <div style="margin-top:14px; border-top:1px solid rgba(255,255,255,0.15); padding-top:10px; text-align:center;">
-                <div style="font-size:10px; color:rgba(245,220,160,0.7); margin-bottom:4px;">WINNER</div>
-                <div style="font-size:20px; font-weight:900; color:var(--gold-light);">🏆 PLAYER 1</div>
-                <div style="font-size:10px; color:rgba(245,220,160,0.6);">All 9 white + Queen covered</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Match format -->
-          <div style="background:var(--rule-box); border:1.5px solid rgba(200,140,20,0.3); border-radius:10px; padding:12px; margin-top:12px;">
-            <div style="font-weight:700; font-size:11px; color:var(--ink); margin-bottom:6px; text-transform:uppercase;">🎮 Match Formats</div>
-            <div style="font-size:10.5px; color:var(--ink-soft); line-height:1.6;">
-              <strong>Casual:</strong> First to clear coins wins the board.<br>
-              <strong>Scored:</strong> Points tracked across multiple boards.<br>
-              <strong>Tournament:</strong> Best of 3 or 5 boards. 29 points wins match.<br>
-              <strong>Toss:</strong> Flip a coin or draw lots to choose who starts.
-            </div>
-          </div>
-
-          <!-- Quick reference -->
-          <div style="background:linear-gradient(135deg,var(--wood-dark),#2a1200); border-radius:10px; padding:12px; margin-top:12px; color:var(--cream);">
-            <div style="font-family:'Bebas Neue',sans-serif; font-size:13px; letter-spacing:2px; color:var(--gold); margin-bottom:8px;">⚡ QUICK POINT GUIDE</div>
-            <div style="font-size:10.5px; line-height:1.8;">
-              <span style="color:var(--white-coin);">⚪ Own coin pocketed</span> = +1 pt<br>
-              <span style="color:#ff8888;">👑 Queen cover bonus</span> = +3 pts<br>
-              <span style="color:#ff6666;">⚠️ Striker foul penalty</span> = coin returns<br>
-              <span style="color:#ff6666;">🚫 3 fouls in row</span> = −5 pts<br>
-              <span style="color:#aaa;">🎯 Opponent coin pocketed</span> = coin returns (no pts)
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══════════════ BONUS: STRIKER TECHNIQUE ══════════════ -->
-  <div class="card full-width">
-    <div class="card-header">
-      <div class="card-num">+</div>
-      <div class="card-title">STRIKER TECHNIQUE &amp; SHOOTING TIPS</div>
-    </div>
-    <div class="card-body">
-      <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:14px;">
-
-        <div style="background:var(--rule-box); border:1.5px solid rgba(200,140,20,0.3); border-radius:10px; padding:14px; text-align:center;">
-          <svg width="80" height="80" viewBox="0 0 80 80" style="margin-bottom:8px;">
-            <!-- Hand flicking striker -->
-            <circle cx="40" cy="35" r="14" fill="#9090c0" stroke="#c0c0ff" stroke-width="1.5"/>
-            <path d="M 30 60 Q 35 50 40 48 Q 45 50 50 60" fill="#f5d0a0" stroke="#c8a060" stroke-width="1"/>
-            <path d="M 35 58 L 35 52 Q 37 48 40 48" fill="none" stroke="#c8a060" stroke-width="1.5"/>
-            <path d="M 45 58 L 45 52 Q 43 48 40 48" fill="none" stroke="#c8a060" stroke-width="1.5"/>
-            <path d="M 40 48 L 40 40" stroke="#f5d0a0" stroke-width="3"/>
-            <!-- Arrow showing flick direction -->
-            <path d="M 50 30 L 65 20" stroke="#e8a020" stroke-width="2" marker-end="url(#arrW)"/>
-            <defs>
-              <marker id="arrW" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
-                <path d="M0,0 L6,3 L0,6 Z" fill="#e8a020"/>
-              </marker>
-            </defs>
-          </svg>
-          <div style="font-weight:700; font-size:11px; color:var(--ink); margin-bottom:4px;">Index Finger Flick</div>
-          <div style="font-size:10px; color:var(--ink-soft);">Most common technique. Place index finger behind striker, flick forward with a sharp snap of the wrist.</div>
-        </div>
-
-        <div style="background:var(--rule-box); border:1.5px solid rgba(200,140,20,0.3); border-radius:10px; padding:14px; text-align:center;">
-          <div style="font-size:32px; margin-bottom:8px;">📐</div>
-          <div style="font-weight:700; font-size:11px; color:var(--ink); margin-bottom:4px;">Aiming Angle</div>
-          <div style="font-size:10px; color:var(--ink-soft);">Think of the pocket as your target. Aim the striker so the coin will deflect toward the pocket. Adjust for rebound angles.</div>
-        </div>
-
-        <div style="background:var(--rule-box); border:1.5px solid rgba(200,140,20,0.3); border-radius:10px; padding:14px; text-align:center;">
-          <div style="font-size:32px; margin-bottom:8px;">⚡</div>
-          <div style="font-weight:700; font-size:11px; color:var(--ink); margin-bottom:4px;">Power Control</div>
-          <div style="font-size:10px; color:var(--ink-soft);">Too hard = striker may foul or scatter coins randomly. Too soft = coins won't reach pockets. Practice moderate, controlled power.</div>
-        </div>
-
-        <div style="background:var(--rule-box); border:1.5px solid rgba(200,140,20,0.3); border-radius:10px; padding:14px; text-align:center;">
-          <div style="font-size:32px; margin-bottom:8px;">🧴</div>
-          <div style="font-weight:700; font-size:11px; color:var(--ink); margin-bottom:4px;">Board Powder</div>
-          <div style="font-size:10px; color:var(--ink-soft);">Boric acid powder is sprinkled on the board to reduce friction. Helps coins slide smoothly. Always use approved powder.</div>
-        </div>
-
-      </div>
-    </div>
-  </div>
-
-</div>
-
-<!-- ═══════════════════════════ FOOTER ═══════════════════════════ -->
-<div class="footer">
-  <div style="display:flex; justify-content:center; gap:24px; margin-bottom:10px; flex-wrap:wrap;">
-    <div style="font-family:'Bebas Neue',sans-serif; font-size:13px; letter-spacing:1.5px; color:var(--gold); display:flex; align-items:center; gap:6px;">
-      <span style="width:8px;height:8px;border-radius:50%;background:#f0ede5;display:inline-block;"></span>
-      9 WHITE COINS
-    </div>
-    <div style="font-family:'Bebas Neue',sans-serif; font-size:13px; letter-spacing:1.5px; color:var(--gold); display:flex; align-items:center; gap:6px;">
-      <span style="width:8px;height:8px;border-radius:50%;background:#1e1a2e;display:inline-block;"></span>
-      9 BLACK COINS
-    </div>
-    <div style="font-family:'Bebas Neue',sans-serif; font-size:13px; letter-spacing:1.5px; color:var(--gold); display:flex; align-items:center; gap:6px;">
-      <span style="width:8px;height:8px;border-radius:50%;background:#cc2222;display:inline-block;"></span>
-      1 RED QUEEN
-    </div>
-    <div style="font-family:'Bebas Neue',sans-serif; font-size:13px; letter-spacing:1.5px; color:var(--gold); display:flex; align-items:center; gap:6px;">
-      <span style="width:8px;height:8px;border-radius:50%;background:#9090c0;display:inline-block;"></span>
-      1 STRIKER
-    </div>
-  </div>
-  <div class="footer-text">
-    Official Carrom Rules Visual Guide · Based on International Carrom Federation Standards · Educational Reference
-  </div>
-</div>
-
-`;
-
-
-export default function Carrom({ onGameOver, onBack }: CarromProps) {
-  useEffect(() => {
-    const id = 'carrom-fonts-link';
-    if (!document.getElementById(id)) {
-      const link = document.createElement('link');
-      link.id = id;
-      link.rel = 'stylesheet';
-      link.href = 'https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Crimson+Pro:ital,wght@0,400;0,600;1,400&family=Bebas+Neue&family=DM+Sans:wght@300;400;500;700&display=swap';
-      document.head.appendChild(link);
-    }
-  }, []);
+  );
 
   return (
-    <div style={{ position: 'relative', minHeight: '100vh' }}>
-      <style dangerouslySetInnerHTML={{ __html: CARROM_CSS }} />
-      <button
-        onClick={onBack}
-        style={{
-          position: 'fixed',
-          top: 16,
-          left: 16,
-          zIndex: 50,
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '8px 14px',
-          background: '#e8a020',
-          color: '#1a0e00',
-          border: 'none',
-          borderRadius: 8,
-          fontWeight: 700,
-          cursor: 'pointer',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-        }}
-      >
-        <ArrowLeft size={16} /> Back
+    <div className="flex flex-col items-center justify-center h-full gap-4 p-8 bg-[#0c1118] text-white">
+      <button onClick={()=>{unsubRef.current?.();setView('main');}} className="absolute top-5 left-5 text-gray-500 hover:text-white text-sm">Cancel</button>
+      <div className="bg-gray-900 border border-green-500/30 rounded-3xl p-6 w-full max-w-sm space-y-4">
+        <div className="text-center">
+          <div className="text-xs text-gray-500 uppercase tracking-widest mb-1">Room Code</div>
+          <div className="text-5xl font-black tracking-widest bg-gray-800 py-3 rounded-2xl border border-gray-700">{code}</div>
+          <button onClick={()=>{navigator.clipboard?.writeText(code).catch(()=>{});setCopied(true);setTimeout(()=>setCopied(false),1500);}}
+            className="mt-2 w-full bg-gray-800 border border-gray-700 rounded-xl py-2 text-sm text-indigo-300 font-bold">
+            {copied?'✓ Copied!':'📋 Copy Code'}
+          </button>
+        </div>
+        <div className="text-xs text-gray-500 text-center">{rows.length}/2 players</div>
+        {[0,1].map(i=>{
+          const p = rows[i]; const pk = i===0?'p1':'p2';
+          return <div key={i} className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border ${p?'border-green-500/30 bg-green-500/10':'border-gray-700/50 bg-gray-800/20'}`}>
+            <div className="w-3 h-3 rounded-full" style={{background: p?P_COLORS[pk as Player]:'#374151'}}/>
+            <span className="text-sm font-semibold" style={{color: p?P_COLORS[pk as Player]:'#6b7280'}}>{p?p.name:`Waiting for P${i+1}…`}</span>
+            {p&&<span className="ml-auto text-green-400 text-xs">✓</span>}
+          </div>;
+        })}
+        {err&&<p className="text-red-400 text-xs text-center">{err}</p>}
+        {myRole==='p1'
+          ? <button onClick={doStart} disabled={rows.length<2||busy}
+              className="w-full bg-green-600 font-black py-4 rounded-2xl disabled:opacity-40 active:scale-95 transition">
+              {rows.length<2?'Waiting for P2…':busy?'…':'Start Game!'}
+            </button>
+          : <div className="text-indigo-400 text-sm text-center flex items-center justify-center gap-2">
+              <div className="w-3 h-3 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"/>
+              Waiting for host to start…
+            </div>
+        }
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════
+//  COIN SETUP — Real carrom arrangement
+//  19 coins: 9 white + 9 black + 1 queen
+//  Inner ring (6): W B W B W B  at radius COIN_R*2.5
+//  Outer ring (12): B W B W…   at radius COIN_R*4.9
+// ════════════════════════════════════════════════════════
+function buildCoins(engine: Matter.Engine) {
+  const cx = W/2, cy = H/2;
+  const coinOpts = (label: CoinColor) => ({
+    restitution: 0.78, friction: 0.03, frictionAir: 0.016,
+    density: 0.0022, label, isStatic: false,
+    collisionFilter: { category: 0x0002, mask: 0x0007 },
+  });
+
+  const bodies: Matter.Body[] = [];
+
+  // Queen — dead center
+  bodies.push(Matter.Bodies.circle(cx, cy, QUEEN_R, { ...coinOpts('queen') }));
+
+  // Inner ring
+  const IR = COIN_R * 2.52;
+  const innerSeq = ['white','black','white','black','white','black'] as CoinColor[];
+  innerSeq.forEach((lbl, i) => {
+    const a = (i/6)*Math.PI*2 - Math.PI/2;
+    bodies.push(Matter.Bodies.circle(cx+Math.cos(a)*IR, cy+Math.sin(a)*IR, COIN_R, coinOpts(lbl)));
+  });
+
+  // Outer ring
+  const OR = COIN_R * 4.85;
+  const outerSeq = ['black','white','black','white','black','white','black','white','black','white','black','white'] as CoinColor[];
+  outerSeq.forEach((lbl, i) => {
+    const a = (i/12)*Math.PI*2 - Math.PI/2 + Math.PI/12;
+    bodies.push(Matter.Bodies.circle(cx+Math.cos(a)*OR, cy+Math.sin(a)*OR, COIN_R, coinOpts(lbl)));
+  });
+
+  Matter.Composite.add(engine.world, bodies);
+  return bodies; // [queen, 6 inner, 12 outer] = 19
+}
+
+// ════════════════════════════════════════════════════════
+//  DRAW HELPERS
+// ════════════════════════════════════════════════════════
+function drawBoard(ctx: CanvasRenderingContext2D, scale: number,
+  turn: Player, queenPending: boolean, queenCoveredBy: Player|null) {
+  const sw = ctx.canvas.width, sh = ctx.canvas.height;
+  const s = scale;
+  const bp = BORDER*s;
+
+  ctx.clearRect(0,0,sw,sh);
+
+  // ── Wood surface ──
+  const bg = ctx.createRadialGradient(sw/2,sh/2,0,sw/2,sh/2,sw*0.72);
+  bg.addColorStop(0,'#d4a520'); bg.addColorStop(0.55,'#b8820a'); bg.addColorStop(1,'#7a5606');
+  ctx.fillStyle = bg; ctx.fillRect(0,0,sw,sh);
+
+  // Grain
+  ctx.save(); ctx.globalAlpha=0.055; ctx.strokeStyle='#000'; ctx.lineWidth=1;
+  for(let i=0;i<sw;i+=11){ctx.beginPath();ctx.moveTo(i,0);ctx.lineTo(i+5,sh);ctx.stroke();}
+  ctx.restore();
+
+  // ── Frame border ──
+  ctx.fillStyle='#5a2806';
+  ctx.fillRect(0,0,sw,bp-5); ctx.fillRect(0,sh-bp+5,sw,bp-5);
+  ctx.fillRect(0,0,bp-5,sh); ctx.fillRect(sw-bp+5,0,bp-5,sh);
+
+  // Inner border lines
+  ctx.strokeStyle='#7c3c0c'; ctx.lineWidth=2.5; ctx.strokeRect(bp,bp,sw-bp*2,sh-bp*2);
+  ctx.strokeStyle='#5a2806'; ctx.lineWidth=1.2; ctx.strokeRect(bp+4*s,bp+4*s,sw-bp*2-8*s,sh-bp*2-8*s);
+
+  // ── Pockets ──
+  POCKETS.forEach(({x,y}) => {
+    const px=x*s, py=y*s;
+    const pg = ctx.createRadialGradient(px,py,1,px,py,POCKET_R*s);
+    pg.addColorStop(0,'#080808'); pg.addColorStop(1,'#150800');
+    ctx.fillStyle=pg; ctx.beginPath(); ctx.arc(px,py,POCKET_R*s,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#3a1600'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.arc(px,py,POCKET_R*s+3,0,Math.PI*2); ctx.stroke();
+  });
+
+  // ── Centre markings ──
+  const cx=sw/2, cy=sh/2;
+  ctx.strokeStyle='rgba(80,38,4,0.45)';
+  [5,11,20,36].forEach(r => {
+    ctx.lineWidth = r>25?1.8:1; ctx.beginPath(); ctx.arc(cx,cy,r*s,0,Math.PI*2); ctx.stroke();
+  });
+  ctx.fillStyle='rgba(80,38,4,0.55)'; ctx.beginPath(); ctx.arc(cx,cy,4*s,0,Math.PI*2); ctx.fill();
+
+  // Diagonal lines
+  ctx.strokeStyle='rgba(80,38,4,0.22)'; ctx.lineWidth=1;
+  const off=bp+26*s;
+  [[cx,cy,off,off],[cx,cy,sw-off,off],[cx,cy,off,sh-off],[cx,cy,sw-off,sh-off]].forEach(
+    ([x1,y1,x2,y2]) => { ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
+  );
+
+  // ── Striker lanes ──
+  ctx.setLineDash([5,8]);
+  (['p1','p2'] as Player[]).forEach(p => {
+    const active = turn===p;
+    const ly = LANE_Y[p]*s;
+    ctx.strokeStyle = active ? P_COLORS[p]+'cc' : 'rgba(255,255,255,0.10)';
+    ctx.lineWidth   = active ? 2 : 1;
+    ctx.beginPath(); ctx.moveTo(bp+12*s,ly); ctx.lineTo(sw-bp-12*s,ly); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  // Queen cover hint
+  if(queenPending && !queenCoveredBy) {
+    ctx.save();
+    ctx.fillStyle='rgba(0,0,0,0.6)';
+    ctx.fillRect(bp+8*s, bp+8*s, sw-bp*2-16*s, 22*s);
+    ctx.font=`bold ${10*s}px sans-serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle='#fbbf24'; ctx.shadowColor='#000'; ctx.shadowBlur=4;
+    ctx.fillText('👑 Queen pocket hua — apna coin pocket karo!', sw/2, bp+19*s);
+    ctx.restore();
+  }
+}
+
+function drawCoins(ctx: CanvasRenderingContext2D, scale: number,
+  bodies: Matter.Body[], pocketedSet: Set<number>,
+  canShoot: boolean, isMoving: boolean, turn: Player) {
+  const s = scale;
+
+  for(const body of bodies) {
+    if(pocketedSet.has(body.id)) continue;
+    if(body.position.x < 0 || body.position.y < 0) continue;
+    const bx=body.position.x*s, by=body.position.y*s;
+    const label = body.label as CoinColor;
+
+    ctx.save();
+
+    if(label==='striker') {
+      const active = canShoot && !isMoving;
+      const pColor = P_COLORS[turn];
+      if(active){ ctx.shadowColor=pColor; ctx.shadowBlur=16; }
+      const sg = ctx.createRadialGradient(bx-3*s,by-3*s,1,bx,by,STRIKER_R*s);
+      sg.addColorStop(0,'#dde'); sg.addColorStop(0.55,'#9090bb'); sg.addColorStop(1,'#404068');
+      ctx.fillStyle=sg; ctx.beginPath(); ctx.arc(bx,by,STRIKER_R*s,0,Math.PI*2); ctx.fill();
+      ctx.shadowBlur=0;
+      ctx.strokeStyle=active?pColor:'#55558a'; ctx.lineWidth=active?2.8:1.2;
+      ctx.beginPath(); ctx.arc(bx,by,STRIKER_R*s,0,Math.PI*2); ctx.stroke();
+      ctx.strokeStyle='rgba(160,160,220,0.5)'; ctx.lineWidth=0.8;
+      ctx.beginPath(); ctx.arc(bx,by,STRIKER_R*s*0.54,0,Math.PI*2); ctx.stroke();
+      if(active){
+        ctx.globalAlpha=0.18; ctx.fillStyle=pColor;
+        ctx.beginPath(); ctx.arc(bx,by,(STRIKER_R+9)*s,0,Math.PI*2); ctx.fill();
+      }
+      ctx.restore(); continue;
+    }
+
+    ctx.shadowColor='rgba(0,0,0,0.5)'; ctx.shadowBlur=5; ctx.shadowOffsetY=2*s;
+
+    let fg: CanvasGradient, outline: string, inner: string;
+    if(label==='queen'){
+      fg=ctx.createRadialGradient(bx-2*s,by-2*s,1,bx,by,QUEEN_R*s);
+      fg.addColorStop(0,'#ff8888'); fg.addColorStop(1,'#cc1111');
+      outline='#880000'; inner='rgba(255,160,160,0.55)';
+    } else if(label==='white'){
+      fg=ctx.createRadialGradient(bx-2*s,by-2*s,1,bx,by,COIN_R*s);
+      fg.addColorStop(0,'#ffffff'); fg.addColorStop(1,'#c8c8c8');
+      outline='#999'; inner='rgba(80,80,80,0.28)';
+    } else {
+      fg=ctx.createRadialGradient(bx-2*s,by-2*s,1,bx,by,COIN_R*s);
+      fg.addColorStop(0,'#3a3a60'); fg.addColorStop(1,'#0c0c1e');
+      outline='#111'; inner='rgba(100,100,190,0.4)';
+    }
+    const r = (label==='queen'?QUEEN_R:COIN_R)*s;
+    ctx.fillStyle=fg; ctx.beginPath(); ctx.arc(bx,by,r,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+    ctx.strokeStyle=outline; ctx.lineWidth=1.2; ctx.beginPath(); ctx.arc(bx,by,r,0,Math.PI*2); ctx.stroke();
+    ctx.strokeStyle=inner; ctx.lineWidth=0.8; ctx.beginPath(); ctx.arc(bx,by,r*0.52,0,Math.PI*2); ctx.stroke();
+    if(label==='queen'){
+      ctx.fillStyle='#ffcc00'; ctx.shadowColor='#ffcc00'; ctx.shadowBlur=6;
+      ctx.beginPath(); ctx.arc(bx,by,3.2*s,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function drawAim(ctx: CanvasRenderingContext2D, scale: number,
+  sx: number, sy: number, tx: number, ty: number,
+  bodies: Matter.Body[], pocketedSet: Set<number>) {
+  const s=scale;
+  ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
+  const dx=sx-tx, dy=sy-ty, dist=Math.hypot(dx,dy);
+  if(dist<5) return;
+  const nx=dx/dist, ny=dy/dist;
+  const pwr=Math.min(dist/(MAX_PULL),1);
+
+  // Drag ghost
+  ctx.save();
+  ctx.globalAlpha=0.15; ctx.strokeStyle='#fff'; ctx.lineWidth=10; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(sx*s,sy*s); ctx.lineTo(tx*s,ty*s); ctx.stroke();
+
+  // Shot line
+  const lineLen=(60+pwr*250)*s;
+  const ex=sx+nx*(lineLen/s)*s, ey=sy+ny*(lineLen/s)*s;
+  // convert to canvas pixels
+  const ecx=(sx+nx*(60/s+pwr*250/s))*s, ecy=(sy+ny*(60/s+pwr*250/s))*s;
+  const bpx=BORDER*s;
+  const cw=ctx.canvas.width, ch=ctx.canvas.height;
+
+  ctx.globalAlpha=0.88; ctx.strokeStyle='#fff'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(sx*s,sy*s); ctx.lineTo(sx*s+nx*(60+pwr*250),sy*s+ny*(60+pwr*250)); ctx.stroke();
+
+  // Trajectory dots
+  let px2=sx*s+nx*(60+pwr*250), py2=sy*s+ny*(60+pwr*250);
+  let vx2=nx, vy2=ny;
+  const steps=Math.floor(pwr*28)+10;
+  ctx.globalAlpha=0.42; ctx.setLineDash([5,10]);
+  ctx.strokeStyle='rgba(255,215,70,0.75)'; ctx.lineWidth=1.8;
+  ctx.beginPath(); ctx.moveTo(px2,py2);
+  for(let i=0;i<steps;i++){
+    px2+=vx2*10; py2+=vy2*10;
+    if(px2<=bpx+3||px2>=cw-bpx-3) vx2=-vx2;
+    if(py2<=bpx+3||py2>=ch-bpx-3) vy2=-vy2;
+    px2=Math.max(bpx+3,Math.min(cw-bpx-3,px2));
+    py2=Math.max(bpx+3,Math.min(ch-bpx-3,py2));
+    ctx.lineTo(px2,py2);
+  }
+  ctx.stroke(); ctx.setLineDash([]);
+
+  // Coin highlight (first coin in path)
+  const SR=STRIKER_R, CR=COIN_R;
+  let cpx=sx*s+nx*(60+pwr*250), cpy=sy*s+ny*(60+pwr*250);
+  let hit=false;
+  outer: for(let i=0;i<200;i++){
+    cpx+=nx*5; cpy+=ny*5;
+    for(const b of bodies){
+      if(pocketedSet.has(b.id)||!['white','black','queen'].includes(b.label)) continue;
+      if(b.position.x<0||b.position.y<0) continue;
+      if(Math.hypot(cpx-b.position.x*s, cpy-b.position.y*s)<(SR+CR)*s){
+        ctx.globalAlpha=0.6; ctx.strokeStyle='#f59e0b';
+        ctx.lineWidth=2.5; ctx.shadowColor='#f59e0b'; ctx.shadowBlur=10;
+        ctx.beginPath(); ctx.arc(b.position.x*s,b.position.y*s,(CR+5)*s,0,Math.PI*2); ctx.stroke();
+        hit=true; break outer;
+      }
+    }
+  }
+
+  // Power dot
+  const pColor=pwr>0.75?'#ef4444':pwr>0.42?'#f59e0b':'#10b981';
+  const dotx=sx*s+nx*(60+pwr*250), doty=sy*s+ny*(60+pwr*250);
+  ctx.globalAlpha=1; ctx.fillStyle=pColor; ctx.shadowColor=pColor; ctx.shadowBlur=12;
+  ctx.beginPath(); ctx.arc(dotx,doty,6,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+// ════════════════════════════════════════════════════════
+//  MAIN COMPONENT
+// ════════════════════════════════════════════════════════
+export default function Carrom({ onGameOver, onBack }: CarromProps) {
+
+  // ── UI state ──
+  const [mode, setMode]     = useState<GameMode>('menu');
+  const [role, setRole]     = useState<Player>('p1');
+  const [roomId, setRoomId] = useState('');
+  const [turn, setTurn]     = useState<Player>('p1');
+  const [scores, setScores] = useState({ p1:0, p2:0 });
+  const [wLeft, setWLeft]   = useState(9); // white coins on board
+  const [bLeft, setBLeft]   = useState(9); // black coins on board
+  const [winner, setWinner] = useState<Player|null>(null);
+  const [timerVal, setTimerVal] = useState(TIMER_SEC);
+  const [power, setPower]   = useState(0);
+  const [foulMsg, setFoulMsg] = useState('');
+  const [extraAnim, setExtraAnim] = useState(false);
+  const [queenMsg, setQueenMsg] = useState('');
+
+  // ── Canvas ──
+  const boardRef = useRef<HTMLCanvasElement>(null);
+  const aimRef   = useRef<HTMLCanvasElement>(null);
+  const wrapRef  = useRef<HTMLDivElement>(null);
+
+  // ── Physics ──
+  const engineRef   = useRef<Matter.Engine|null>(null);
+  const runnerRef   = useRef<Matter.Runner|null>(null);
+  const strikerRef  = useRef<Matter.Body|null>(null);
+  const allBodies   = useRef<Matter.Body[]>([]);   // all coins + queen
+  const pocketedSet = useRef<Set<number>>(new Set());
+
+  // ── Refs (avoid stale closures) ──
+  const turnRef    = useRef<Player>('p1');
+  const modeRef    = useRef<GameMode>('menu');
+  const roleRef    = useRef<Player>('p1');
+  const roomIdRef  = useRef('');
+  const scoresRef  = useRef({p1:0,p2:0});
+  const winnerRef  = useRef<Player|null>(null);
+
+  // Per-shot state (refs, not state — no re-render needed mid-shot)
+  const canShootRef = useRef(true);
+  const isMoving    = useRef(false);
+  const isRxStrike  = useRef(false); // received opponent shot (online)
+
+  // Shot result flags (set in handlePocket, read in afterShot)
+  const shotFlags = useRef({
+    strikerPocketed: false,
+    ownCoin: false,       // own colour pocketed
+    oppCoin: false,       // opponent colour pocketed
+    queenPocketed: false, // queen pocketed this shot
+  });
+
+  // Cross-shot queen state
+  const queenState = useRef<{
+    pocketed: boolean;     // queen currently pocketed (waiting cover)
+    coveredBy: Player|null;// once covered, set permanently
+    graceUsed: boolean;    // extra grace shot given
+  }>({ pocketed:false, coveredBy:null, graceUsed:false });
+
+  const consecFouls = useRef({p1:0, p2:0});
+  const extraTurn   = useRef(false);
+
+  // Input
+  const isDragging  = useRef(false);
+  const dragPt      = useRef<{x:number;y:number}|null>(null);
+  const strikerSlide= useRef(0.5); // 0–1 along lane
+
+  // Timing / render
+  const scaleRef    = useRef(1);
+  const timerRef2   = useRef<ReturnType<typeof setInterval>|null>(null);
+  const timerValRef = useRef(TIMER_SEC);
+  const rafRef      = useRef(0);
+  const audioRef    = useRef<AudioContext|null>(null);
+
+  // sync state → refs
+  useEffect(()=>{ turnRef.current=turn; },[turn]);
+  useEffect(()=>{ modeRef.current=mode; },[mode]);
+  useEffect(()=>{ roleRef.current=role; },[role]);
+  useEffect(()=>{ roomIdRef.current=roomId; },[roomId]);
+  useEffect(()=>{ scoresRef.current=scores; },[scores]);
+
+  // ── Audio ──
+  function beep(freq:number,dur:number,type:OscillatorType='sine',vol=0.18){
+    try{
+      if(!audioRef.current) audioRef.current=new (window.AudioContext||(window as any).webkitAudioContext)();
+      const ac=audioRef.current, o=ac.createOscillator(), g=ac.createGain();
+      o.type=type; o.frequency.setValueAtTime(freq,ac.currentTime);
+      g.gain.setValueAtTime(vol,ac.currentTime); g.gain.exponentialRampToValueAtTime(0.001,ac.currentTime+dur);
+      o.connect(g); g.connect(ac.destination); o.start(ac.currentTime); o.stop(ac.currentTime+dur);
+    }catch{}
+  }
+  const playShoot=(pwr:number)=>{ beep(180+pwr*240,0.18,'sawtooth',0.26*pwr); };
+  const playPocket=()=>{ beep(880,0.08,'sine',0.2); setTimeout(()=>beep(440,0.15,'sine',0.15),80); };
+  const playFoul=()=>{ beep(140,0.32,'sawtooth',0.22); };
+  const playWin=()=>{ [440,550,660,880].forEach((f,i)=>setTimeout(()=>beep(f,0.18,'sine',0.22),i*100)); };
+  const playBounce=()=>{ beep(200,0.08,'square',0.07); };
+  const playTick=()=>{ beep(900,0.05,'square',0.05); };
+
+  // ── Helpers ──
+  const myColor  =(p:Player)=> p==='p1'?'white':'black';
+  const oppColor =(p:Player)=> p==='p1'?'black':'white';
+  const opponent =(p:Player):Player=> p==='p1'?'p2':'p1';
+  const pName    =(p:Player)=>{
+    if(modeRef.current==='bot'&&p==='p2') return 'AI Bot';
+    if(modeRef.current==='online_playing') return p===roleRef.current?'You':'Opponent';
+    return P_LABELS[p];
+  };
+
+  function strikerPosFor(p: Player, slide=strikerSlide.current){
+    const minX=BORDER+STRIKER_R+10, maxX=W-BORDER-STRIKER_R-10;
+    return { x: minX+(maxX-minX)*slide, y: LANE_Y[p] };
+  }
+
+  function coinsLeft(color:string){
+    return allBodies.current.filter(b=>b.label===color&&!pocketedSet.current.has(b.id)&&b.position.x>0).length;
+  }
+
+  function pocketBody(b:Matter.Body){
+    pocketedSet.current.add(b.id);
+    Matter.Body.setPosition(b,{x:-600,y:-600});
+    Matter.Body.setVelocity(b,{x:0,y:0});
+    Matter.Body.setAngularVelocity(b,0);
+  }
+
+  function returnCoin(color:string){
+    const b=allBodies.current.find(x=>x.label===color&&pocketedSet.current.has(x.id));
+    if(!b) return;
+    pocketedSet.current.delete(b.id);
+    const j=(Math.random()-0.5)*COIN_R*3;
+    Matter.Body.setPosition(b,{x:W/2+j,y:H/2+j});
+    Matter.Body.setVelocity(b,{x:0,y:0});
+  }
+
+  function returnQueen(){
+    const q=allBodies.current.find(x=>x.label==='queen');
+    if(!q) return;
+    pocketedSet.current.delete(q.id);
+    Matter.Body.setPosition(q,{x:W/2,y:H/2});
+    Matter.Body.setVelocity(q,{x:0,y:0});
+    queenState.current.pocketed=false;
+  }
+
+  function showFoul(msg:string){
+    setFoulMsg(msg); playFoul();
+    setTimeout(()=>setFoulMsg(''),2800);
+  }
+
+  function flashExtra(){
+    setExtraAnim(true); setTimeout(()=>setExtraAnim(false),1200);
+  }
+
+  // ── handlePocket — called when a body enters a pocket sensor ──
+  // Rules:
+  //   Striker → FOUL: turn passes, penalty (own coin returns from pocket OR coin of own colour returns)
+  //   Queen  → grace: player must pocket own coin in SAME shot or NEXT shot
+  //              • same shot: covered, +3 bonus
+  //              • next shot: covered if own coin pocketed, else queen returns
+  //   Own coin → extra turn, +1 point (UNLESS foul already set)
+  //   Opp coin → FOUL: opp coin returns, turn passes
+  //   Pocketing opponent's last coin when none of own are on board → FOUL (you cannot win for opponent)
+  function handlePocket(body: Matter.Body){
+    if(pocketedSet.current.has(body.id)) return;
+    const label = body.label as CoinColor;
+    const cur   = turnRef.current;
+    pocketBody(body);
+    playPocket();
+
+    if(label==='striker'){
+      shotFlags.current.strikerPocketed=true;
+      return; // rest handled in afterShot
+    }
+
+    if(label==='queen'){
+      shotFlags.current.queenPocketed=true;
+      queenState.current.pocketed=true;
+      setQueenMsg('👑 Queen! Apna coin pocket karo is ya agla shot mein');
+      return;
+    }
+
+    if(label===myColor(cur)){
+      shotFlags.current.ownCoin=true;
+      // if queen pending cover → this coin covers it
+      if(queenState.current.pocketed&&!queenState.current.coveredBy){
+        queenState.current.coveredBy=cur;
+        queenState.current.pocketed=false;
+        setQueenMsg('👑 Queen Covered! +3 bonus');
+        setTimeout(()=>setQueenMsg(''),2500);
+        setScores(prev=>{ const n={...prev,[cur]:prev[cur]+3}; scoresRef.current=n; return n; });
+      }
+      setScores(prev=>{ const n={...prev,[cur]:prev[cur]+1}; scoresRef.current=n; return n; });
+      return;
+    }
+
+    // opponent colour
+    if(label===oppColor(cur)){
+      shotFlags.current.oppCoin=true;
+      returnCoin(oppColor(cur));
+      return;
+    }
+  }
+
+  // ── afterShot — called ~280ms after all bodies stop ──
+  function afterShot(){
+    if(winnerRef.current) return;
+    const cur = turnRef.current;
+    const sf  = shotFlags.current;
+    let foul  = false;
+
+    // 1. Striker pocketed → foul
+    if(sf.strikerPocketed){
+      foul=true;
+      // Penalty: if own coin in pocket, return one; else nothing extra
+      returnCoin(myColor(cur));
+      showFoul('⚠️ FOUL — Striker pocket! Turn jaata hai');
+      // Reset striker back on board
+      pocketedSet.current.delete(strikerRef.current!.id);
+    }
+
+    // 2. Opponent coin pocketed → foul
+    if(sf.oppCoin && !foul){
+      foul=true;
+      showFoul('⚠️ FOUL — Opponent ka coin! Turn jaata hai');
+    }
+
+    // 3. Queen grace handling
+    if(sf.queenPocketed){
+      if(!sf.ownCoin && !foul){
+        // same shot no own coin: give grace extra shot
+        queenState.current.graceUsed=false;
+        extraTurn.current=true;
+        setQueenMsg('👑 Agli shot mein apna coin pocket karo!');
+        setTimeout(()=>setQueenMsg(''),3500);
+      } else if(sf.ownCoin && !foul){
+        // covered same shot — already handled in handlePocket
+        // nothing extra needed here
+      } else {
+        // foul + queen pocketed → queen returns
+        returnQueen();
+        setQueenMsg('');
+      }
+    }
+
+    // 4. If queen was pending (from previous grace) and still not covered
+    if(!sf.queenPocketed && queenState.current.pocketed && !queenState.current.coveredBy){
+      if(!queenState.current.graceUsed){
+        // This is the grace shot
+        queenState.current.graceUsed=true;
+        if(sf.ownCoin && !foul){
+          // own coin pocketed in grace shot → covered
+          queenState.current.coveredBy=cur;
+          queenState.current.pocketed=false;
+          setQueenMsg('👑 Queen Covered! +3 bonus');
+          setTimeout(()=>setQueenMsg(''),2500);
+          setScores(prev=>{ const n={...prev,[cur]:prev[cur]+3}; scoresRef.current=n; return n; });
+        } else {
+          // grace shot wasted → queen returns
+          returnQueen();
+          showFoul('👑 Queen cover nahi hua — wapas centre!');
+          setQueenMsg('');
+        }
+      }
+    }
+
+    // 5. Own coin pocketed without foul → extra turn
+    if(sf.ownCoin && !foul && !extraTurn.current){
+      extraTurn.current=true;
+    }
+
+    // 6. Foul → reset extra turn, consecutive foul count
+    if(foul){
+      extraTurn.current=false;
+      consecFouls.current[cur]++;
+      if(consecFouls.current[cur]>=3){
+        setScores(prev=>{ const n={...prev,[cur]:Math.max(0,prev[cur]-5)}; scoresRef.current=n; return n; });
+        showFoul(`🚫 3 fouls! ${pName(cur)}: -5 points`);
+        consecFouls.current[cur]=0;
+      }
+    } else {
+      consecFouls.current[cur]=0;
+    }
+
+    // Reset per-shot flags
+    shotFlags.current={strikerPocketed:false,ownCoin:false,oppCoin:false,queenPocketed:false};
+
+    // Update counts
+    setWLeft(coinsLeft('white')); setBLeft(coinsLeft('black'));
+
+    // Check win
+    const won = checkWin();
+    if(!won) endTurn(foul);
+  }
+
+  // ── checkWin ──
+  // P1 wins when all white pocketed + queen covered (by anyone)
+  // P2 wins when all black pocketed + queen covered
+  // Edge: if all coins of both gone → highest score
+  function checkWin():boolean{
+    if(winnerRef.current) return true;
+    const wl=coinsLeft('white'), bl=coinsLeft('black');
+    const qCovered = !!queenState.current.coveredBy;
+
+    if(wl===0 && qCovered){ triggerWin('p1'); return true; }
+    if(bl===0 && qCovered){ triggerWin('p2'); return true; }
+    if(wl===0 && bl===0){
+      const w = scoresRef.current.p1>=scoresRef.current.p2?'p1':'p2';
+      triggerWin(w); return true;
+    }
+    return false;
+  }
+
+  function triggerWin(p:Player){
+    clearTimer2();
+    canShootRef.current=false;
+    winnerRef.current=p;
+    setWinner(p); playWin();
+  }
+
+  // ── endTurn ──
+  function endTurn(wasFoul:boolean){
+    clearTimer2();
+    const next = wasFoul||!extraTurn.current ? opponent(turnRef.current) : turnRef.current;
+    extraTurn.current=false;
+
+    turnRef.current=next; setTurn(next);
+    resetStriker(next);
+
+    if(modeRef.current==='online_playing'){
+      canShootRef.current = roleRef.current===next;
+    } else {
+      canShootRef.current=true;
+    }
+
+    // Online sync
+    if(modeRef.current==='online_playing'&&roomIdRef.current){
+      mockBackend.publish(('carrom_sync_'+roomIdRef.current) as any,{
+        type:'sync_state', turn:next, scores:scoresRef.current,
+      });
+    }
+
+    if(!winnerRef.current){
+      if(modeRef.current==='bot'&&next==='p2') setTimeout(runBot,900+Math.random()*600);
+      else startTimer2();
+    }
+  }
+
+  function resetStriker(p:Player){
+    if(!strikerRef.current) return;
+    strikerSlide.current=0.5;
+    const sp=strikerPosFor(p,0.5);
+    Matter.Body.setPosition(strikerRef.current,sp);
+    Matter.Body.setVelocity(strikerRef.current,{x:0,y:0});
+    Matter.Body.setAngularVelocity(strikerRef.current,0);
+    pocketedSet.current.delete(strikerRef.current.id);
+    isDragging.current=false; dragPt.current=null;
+  }
+
+  // ── Timer ──
+  function startTimer2(){
+    clearTimer2();
+    timerValRef.current=TIMER_SEC; setTimerVal(TIMER_SEC);
+    timerRef2.current=setInterval(()=>{
+      timerValRef.current--; setTimerVal(timerValRef.current);
+      if(timerValRef.current<=5) playTick();
+      if(timerValRef.current<=0){
+        clearTimer2();
+        shotFlags.current={strikerPocketed:false,ownCoin:false,oppCoin:false,queenPocketed:false};
+        isMoving.current=false;
+        showFoul('⏱️ Time out! FOUL');
+        returnCoin(myColor(turnRef.current));
+        endTurn(true);
+      }
+    },1000);
+  }
+  function clearTimer2(){ if(timerRef2.current){clearInterval(timerRef2.current);timerRef2.current=null;} }
+
+  // ── AI Bot ──
+  function runBot(){
+    if(!canShootRef.current||isMoving.current||turnRef.current!=='p2'||!strikerRef.current||!engineRef.current) return;
+    canShootRef.current=false; isMoving.current=true;
+    const sx=strikerRef.current.position.x, sy=strikerRef.current.position.y;
+    const targets=allBodies.current.filter(b=>
+      !pocketedSet.current.has(b.id)&&b.position.x>0&&
+      (b.label==='black'||(b.label==='queen'&&!queenState.current.coveredBy))
+    );
+    let tx=W/2,ty=H/2-50;
+    if(targets.length){
+      let best=targets[0],bd=Infinity;
+      targets.forEach(t=>{const d=Math.hypot(t.position.x-sx,t.position.y-sy);if(d<bd){bd=d;best=t;}});
+      tx=best.position.x+(Math.random()-0.5)*32;
+      ty=best.position.y+(Math.random()-0.5)*32;
+    }
+    const dx=tx-sx,dy=ty-sy,d=Math.hypot(dx,dy);
+    const pwr=0.42+Math.random()*0.52;
+    const fx=(dx/d)*pwr*FORCE_K, fy=(dy/d)*pwr*FORCE_K;
+    shotFlags.current={strikerPocketed:false,ownCoin:false,oppCoin:false,queenPocketed:false};
+    Matter.Body.applyForce(strikerRef.current,strikerRef.current.position,{x:fx,y:fy});
+    playShoot(pwr);
+  }
+
+  // ── Physics ──
+  function initPhysics(){
+    if(engineRef.current){ Matter.Runner.stop(runnerRef.current!); Matter.Engine.clear(engineRef.current); }
+    pocketedSet.current.clear(); allBodies.current=[];
+
+    const engine=Matter.Engine.create({gravity:{x:0,y:0}});
+    const runner=Matter.Runner.create();
+    engineRef.current=engine; runnerRef.current=runner;
+
+    // Walls
+    const wo={isStatic:true,restitution:0.80,friction:0,label:'wall' as CoinColor,
+              collisionFilter:{category:0x0001,mask:0x0006}};
+    const hp=BORDER/2;
+    const walls=[
+      Matter.Bodies.rectangle(W/2,hp,W,BORDER,wo),
+      Matter.Bodies.rectangle(W/2,H-hp,W,BORDER,wo),
+      Matter.Bodies.rectangle(hp,H/2,BORDER,H,wo),
+      Matter.Bodies.rectangle(W-hp,H/2,BORDER,H,wo),
+    ];
+
+    // Pocket sensors
+    const pockets=POCKETS.map(({x,y})=>
+      Matter.Bodies.circle(x,y,POCKET_R,{isStatic:true,isSensor:true,label:'pocket' as CoinColor,
+        collisionFilter:{category:0x0004,mask:0x0002}})
+    );
+
+    // Coins
+    const coins=buildCoins(engine);
+    allBodies.current=coins;
+
+    // Striker
+    const sp=strikerPosFor(turnRef.current);
+    const striker=Matter.Bodies.circle(sp.x,sp.y,STRIKER_R,{
+      restitution:0.82,friction:0.04,frictionAir:0.018,density:0.005,
+      label:'striker' as CoinColor,
+      collisionFilter:{category:0x0002,mask:0x0007},
+    });
+    strikerRef.current=striker;
+
+    Matter.Composite.add(engine.world,[...walls,...pockets,striker]);
+
+    // Collision handler
+    Matter.Events.on(engine,'collisionStart',(evt:Matter.IEventCollision<Matter.Engine>)=>{
+      for(const {bodyA,bodyB} of evt.pairs){
+        if((bodyA.label==='wall'&&bodyB.label==='striker')||(bodyB.label==='wall'&&bodyA.label==='striker'))
+          playBounce();
+        const isPA=bodyA.label==='pocket', isPB=bodyB.label==='pocket';
+        if(isPA||isPB){
+          const coin=isPA?bodyB:bodyA;
+          if(!['wall','pocket'].includes(coin.label)&&!pocketedSet.current.has(coin.id)
+             &&coin.position.x>0&&coin.position.y>0)
+            handlePocket(coin);
+        }
+      }
+    });
+
+    // Stop detection
+    Matter.Events.on(engine,'afterUpdate',()=>{
+      if(!isMoving.current) return;
+      const bodies=Matter.Composite.allBodies(engine.world);
+      const moving=bodies.some((b:Matter.Body)=>{
+        if(b.isStatic||b.position.x<0||b.position.y<0) return false;
+        const v=b.velocity,av=b.angularVelocity;
+        return v.x*v.x+v.y*v.y>0.007||Math.abs(av)>0.007;
+      });
+      if(!moving){
+        isMoving.current=false;
+        if(modeRef.current==='online_playing'&&isRxStrike.current){
+          isRxStrike.current=false; return;
+        }
+        isRxStrike.current=false;
+        setTimeout(afterShot,280);
+      }
+    });
+
+    Matter.Runner.run(runner,engine);
+  }
+
+  // ── Online sync ──
+  useEffect(()=>{
+    if(mode!=='online_playing'||!roomId) return;
+    const unsub=mockBackend.subscribe(('carrom_sync_'+roomId) as any,(data:any)=>{
+      if(data.type==='strike'){
+        if(data.shooter===roleRef.current) return;
+        if(turnRef.current!==roleRef.current&&strikerRef.current){
+          canShootRef.current=false; isMoving.current=true; isRxStrike.current=true;
+          Matter.Body.setPosition(strikerRef.current,data.pos);
+          Matter.Body.applyForce(strikerRef.current,data.pos,data.force);
+        }
+      } else if(data.type==='sync_state'){
+        if(data.scores){ setScores(data.scores); scoresRef.current=data.scores; }
+        if(data.turn){
+          setTurn(data.turn); turnRef.current=data.turn;
+          canShootRef.current=roleRef.current===data.turn;
+          isMoving.current=false; isRxStrike.current=false;
+          if(!winnerRef.current&&roleRef.current===data.turn) startTimer2();
+        }
+        if(data.winner){ triggerWin(data.winner); }
+      }
+    });
+    return ()=>unsub();
+  },[mode,roomId]);
+
+  // ── Game loop ──
+  function startLoop(){
+    const tick=()=>{
+      const board=boardRef.current, aim=aimRef.current, eng=engineRef.current;
+      if(!board||!aim||!eng) { rafRef.current=requestAnimationFrame(tick); return; }
+      const bctx=board.getContext('2d'), actx=aim.getContext('2d');
+      if(!bctx||!actx) { rafRef.current=requestAnimationFrame(tick); return; }
+      const s=scaleRef.current;
+      const bodies=Matter.Composite.allBodies(eng.world);
+
+      // Board + static elements
+      drawBoard(bctx,s,turnRef.current,
+        queenState.current.pocketed,queenState.current.coveredBy);
+
+      // All coin bodies (striker included)
+      const allDraw=[...allBodies.current];
+      if(strikerRef.current) allDraw.push(strikerRef.current);
+      drawCoins(bctx,s,allDraw,pocketedSet.current,
+        canShootRef.current,isMoving.current,turnRef.current);
+
+      // Aim overlay
+      if(isDragging.current&&dragPt.current&&strikerRef.current){
+        drawAim(actx,s,
+          strikerRef.current.position.x,strikerRef.current.position.y,
+          dragPt.current.x,dragPt.current.y,
+          allBodies.current,pocketedSet.current);
+      } else {
+        actx.clearRect(0,0,aim.width,aim.height);
+      }
+
+      rafRef.current=requestAnimationFrame(tick);
+    };
+    rafRef.current=requestAnimationFrame(tick);
+  }
+  function stopLoop(){ if(rafRef.current) cancelAnimationFrame(rafRef.current); }
+
+  // ── Canvas setup after mode change ──
+  useEffect(()=>{
+    if(mode==='menu'||mode==='online_lobby') return;
+    const t=setTimeout(()=>{
+      const canvas=boardRef.current, aimC=aimRef.current, wrap=wrapRef.current;
+      if(!canvas||!aimC||!wrap) return;
+      const size=Math.min(wrap.clientWidth,wrap.clientHeight,560);
+      const dpr=window.devicePixelRatio||1;
+      const px=Math.floor(size*dpr);
+      scaleRef.current=(size/W)*dpr;
+      canvas.width=px; canvas.height=px; canvas.style.width=size+'px'; canvas.style.height=size+'px';
+      aimC.width=px; aimC.height=px; aimC.style.width=size+'px'; aimC.style.height=size+'px';
+      initPhysics(); startLoop(); startTimer2();
+    },60);
+    return ()=>clearTimeout(t);
+  },[mode]);
+
+  useEffect(()=>()=>{
+    stopLoop(); clearTimer2();
+    if(engineRef.current){ Matter.Runner.stop(runnerRef.current!); Matter.Engine.clear(engineRef.current); }
+  },[]);
+
+  // ── startGame ──
+  function startGame(m:GameMode, r?:Player){
+    stopLoop(); clearTimer2();
+    if(engineRef.current){ Matter.Runner.stop(runnerRef.current!); Matter.Engine.clear(engineRef.current); }
+    // reset all state
+    setTurn('p1'); turnRef.current='p1';
+    setScores({p1:0,p2:0}); scoresRef.current={p1:0,p2:0};
+    setWLeft(9); setBLeft(9);
+    setWinner(null); winnerRef.current=null;
+    setFoulMsg(''); setQueenMsg(''); setExtraAnim(false); setPower(0);
+    setTimerVal(TIMER_SEC); timerValRef.current=TIMER_SEC;
+    canShootRef.current=true; isMoving.current=false; isRxStrike.current=false;
+    extraTurn.current=false;
+    shotFlags.current={strikerPocketed:false,ownCoin:false,oppCoin:false,queenPocketed:false};
+    queenState.current={pocketed:false,coveredBy:null,graceUsed:false};
+    consecFouls.current={p1:0,p2:0};
+    isDragging.current=false; dragPt.current=null; strikerSlide.current=0.5;
+    if(r){setRole(r);roleRef.current=r;}
+    setMode(m); modeRef.current=m;
+  }
+
+  // mpSession auto-launch
+  if(mode==='menu'&&mpSession.forGame('carrom')){
+    const sess=mpSession.forGame('carrom')!;
+    setTimeout(()=>{
+      setRole(sess.role as Player); roleRef.current=sess.role as Player;
+      setRoomId(sess.roomId); roomIdRef.current=sess.roomId;
+      mockBackend.joinRoom(sess.roomId);
+      startGame('online_playing',sess.role as Player);
+    },0);
+  }
+
+  // ── Input helpers ──
+  function toPhys(e:React.PointerEvent){
+    const c=boardRef.current!; const r=c.getBoundingClientRect();
+    return {x:(e.clientX-r.left)/scaleRef.current*window.devicePixelRatio,
+            y:(e.clientY-r.top)/scaleRef.current*window.devicePixelRatio};
+  }
+
+  function onDown(e:React.PointerEvent){
+    if(!canShootRef.current||isMoving.current||winnerRef.current) return;
+    if(modeRef.current==='bot'&&turnRef.current==='p2') return;
+    if(modeRef.current==='online_playing'&&roleRef.current!==turnRef.current) return;
+    if(!strikerRef.current) return;
+    const pos=toPhys(e);
+    const sx=strikerRef.current.position.x, sy=strikerRef.current.position.y;
+    // Lane tap → slide striker
+    if(Math.hypot(pos.x-sx,pos.y-sy)>STRIKER_R*4){
+      const laneY=LANE_Y[turnRef.current];
+      if(Math.abs(pos.y-laneY)<STRIKER_R*2.8){
+        const minX=BORDER+STRIKER_R+10, maxX=W-BORDER-STRIKER_R-10;
+        const nx2=Math.max(minX,Math.min(maxX,pos.x));
+        strikerSlide.current=(nx2-minX)/(maxX-minX);
+        Matter.Body.setPosition(strikerRef.current,{x:nx2,y:laneY});
+        Matter.Body.setVelocity(strikerRef.current,{x:0,y:0});
+      }
+      return;
+    }
+    isDragging.current=true; dragPt.current=pos; clearTimer2();
+  }
+
+  function onMove(e:React.PointerEvent){
+    if(!isDragging.current||!strikerRef.current) return;
+    const pos=toPhys(e); dragPt.current=pos;
+    const dx=strikerRef.current.position.x-pos.x, dy=strikerRef.current.position.y-pos.y;
+    setPower(Math.min(Math.hypot(dx,dy)/MAX_PULL,1));
+  }
+
+  function onUp(e:React.PointerEvent){
+    if(!isDragging.current||!dragPt.current||!strikerRef.current){ isDragging.current=false;dragPt.current=null;setPower(0);return; }
+    const pos=dragPt.current;
+    const sx=strikerRef.current.position.x, sy=strikerRef.current.position.y;
+    const dx=sx-pos.x, dy=sy-pos.y, dist=Math.hypot(dx,dy);
+    isDragging.current=false; dragPt.current=null; setPower(0);
+    if(dist<6){startTimer2();return;}
+    const pwr=Math.min(dist/MAX_PULL,1);
+    const fx=(dx/dist)*pwr*FORCE_K, fy=(dy/dist)*pwr*FORCE_K;
+    canShootRef.current=false; isMoving.current=true;
+    shotFlags.current={strikerPocketed:false,ownCoin:false,oppCoin:false,queenPocketed:false};
+    Matter.Body.applyForce(strikerRef.current,strikerRef.current.position,{x:fx,y:fy});
+    playShoot(pwr);
+    if(modeRef.current==='online_playing'&&roomIdRef.current){
+      mockBackend.publish(('carrom_sync_'+roomIdRef.current) as any,{
+        type:'strike',pos:strikerRef.current.position,force:{x:fx,y:fy},shooter:roleRef.current,
+      });
+    }
+  }
+
+  // ════ RENDER ════
+  const pwr100=Math.round(power*100);
+  const tPct  =timerVal/TIMER_SEC;
+  const tColor=timerVal<=5?'#ef4444':timerVal<=10?'#f59e0b':'#10b981';
+  const isMyTurn=mode!=='online_playing'||role===turn;
+
+  if(mode==='menu') return (
+    <div className="flex flex-col items-center justify-center h-full p-6 bg-gradient-to-b from-[#0c1118] to-[#0a0e14] text-white">
+      <button onClick={()=>onGameOver(0)} className="absolute top-5 left-5 text-gray-500 hover:text-white text-sm flex items-center gap-1">
+        <ArrowLeft className="w-4 h-4"/> Back
       </button>
-      <div dangerouslySetInnerHTML={{ __html: CARROM_HTML }} />
-      <div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0 40px' }}>
-        <button
-          onClick={() => onGameOver(0, 'Completed')}
-          style={{
-            padding: '12px 28px',
-            background: '#e8a020',
-            color: '#1a0e00',
-            border: 'none',
-            borderRadius: 10,
-            fontWeight: 800,
-            fontSize: 14,
-            letterSpacing: 1,
-            cursor: 'pointer',
-          }}
-        >
-          DONE READING
+      <div className="w-24 h-24 rounded-full bg-gradient-to-br from-amber-500 to-red-600 flex items-center justify-center shadow-[0_0_40px_rgba(245,158,11,0.5)] mb-5">
+        <span className="text-5xl select-none">🎯</span>
+      </div>
+      <h1 className="text-4xl font-black tracking-tight bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent mb-2">CARROM</h1>
+      <p className="text-gray-500 text-xs mb-2 tracking-widest uppercase">2 Player Board Game</p>
+
+      {/* Quick rules */}
+      <div className="bg-gray-800/50 border border-gray-700/50 rounded-2xl p-4 mb-7 w-full max-w-xs text-xs text-gray-400 space-y-1.5">
+        <div className="font-bold text-gray-300 mb-2 text-sm">📋 Rules</div>
+        <div>⚪ <span className="text-amber-400 font-bold">P1</span> = White coins &nbsp;|&nbsp; ⚫ <span className="text-indigo-400 font-bold">P2</span> = Black coins</div>
+        <div>🔴 Queen: pocket karo + same/agla shot mein apna coin → <span className="text-yellow-400">+3 bonus</span></div>
+        <div>✅ Apna coin pocket = <span className="text-green-400">Extra turn + 1 point</span></div>
+        <div>❌ Striker pocket = <span className="text-red-400">FOUL, turn jaata hai</span></div>
+        <div>❌ Opponent coin = <span className="text-red-400">FOUL, woh coin wapas</span></div>
+        <div>⏱️ 30 sec per turn | 3 fouls = −5 pts</div>
+      </div>
+
+      <div className="flex flex-col gap-3 w-full max-w-xs">
+        <button onClick={()=>startGame('bot')}
+          className="w-full py-4 rounded-2xl bg-gradient-to-r from-amber-600 to-amber-500 font-bold text-lg active:scale-95 transition flex items-center justify-center gap-3">
+          <Bot className="w-5 h-5"/> VS AI Bot
+        </button>
+        <button onClick={()=>startGame('local')}
+          className="w-full py-4 rounded-2xl bg-gray-800 border border-gray-600 hover:bg-gray-700 font-bold text-lg active:scale-95 transition flex items-center justify-center gap-3">
+          <Users className="w-5 h-5 text-yellow-400"/> Local 2 Player
+        </button>
+        <button onClick={()=>setMode('online_lobby')}
+          className="w-full py-4 rounded-2xl bg-gray-800 border border-gray-600 hover:bg-gray-700 font-bold text-lg active:scale-95 transition flex items-center justify-center gap-3">
+          <Globe className="w-5 h-5 text-indigo-400"/> Online
         </button>
       </div>
+    </div>
+  );
+
+  if(mode==='online_lobby') return (
+    <OnlineLobby
+      onStart={(r,id)=>{setRole(r);roleRef.current=r;setRoomId(id);roomIdRef.current=id;startGame('online_playing',r);}}
+      onBack={()=>setMode('menu')}
+    />
+  );
+
+  return (
+    <div className="flex flex-col h-full bg-gradient-to-b from-[#0c1118] to-[#0a0e14] text-white overflow-hidden select-none">
+
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-4 pt-3 pb-2 shrink-0">
+        <button onClick={()=>{stopLoop();clearTimer2();onGameOver(Math.max(scores.p1,scores.p2),'Completed');}}
+          className="text-xs text-gray-500 hover:text-white border border-gray-700 px-3 py-1.5 rounded-xl font-bold transition">
+          Exit
+        </button>
+        {/* Timer */}
+        <div className="flex items-center gap-2">
+          <div className="w-20 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-1000" style={{width:`${tPct*100}%`,background:tColor}}/>
+          </div>
+          <span className="text-sm font-black tabular-nums w-8" style={{color:tColor}}>{timerVal}s</span>
+        </div>
+        <div className="text-xs text-gray-600 font-bold uppercase tracking-widest">
+          {mode==='bot'?'VS BOT':mode==='local'?'LOCAL':'ONLINE'}
+        </div>
+      </div>
+
+      {/* Score cards */}
+      <div className="flex gap-2 px-4 pb-2 shrink-0">
+        {(['p1','p2'] as Player[]).map(p=>(
+          <div key={p} className={`flex-1 flex items-center justify-between px-3 py-2 rounded-xl border transition-all duration-300 ${
+            turn===p?'scale-[1.02]':'opacity-55 border-gray-700/40 bg-gray-800/20'
+          }`} style={turn===p?{borderColor:P_COLORS[p]+'88',background:P_COLORS[p]+'14'}:{}}>
+            <div>
+              <div className="text-[10px] font-black uppercase tracking-wider flex items-center gap-1" style={{color:P_COLORS[p]}}>
+                {turn===p&&!winner&&<span className="animate-pulse">▶</span>} {pName(p)}
+              </div>
+              <div className="text-[9px] text-gray-500 mt-0.5">
+                {p==='p1'?`⚪ ${wLeft} left`:`⚫ ${bLeft} left`}
+                {queenState.current.coveredBy===p?<span className="text-yellow-400 ml-1">+Queen</span>:null}
+              </div>
+            </div>
+            <div className="text-2xl font-black">{scores[p]}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Foul / queen message */}
+      {(foulMsg||queenMsg||extraAnim)&&(
+        <div className="px-4 mb-1 shrink-0">
+          <div className={`text-xs font-bold text-center py-1.5 rounded-xl border ${
+            extraAnim?'bg-green-500/15 border-green-500/30 text-green-300':
+            queenMsg?'bg-yellow-500/15 border-yellow-500/30 text-yellow-300':
+            'bg-red-500/15 border-red-500/30 text-red-300'
+          }`}>
+            {extraAnim?'🎉 Extra Turn!':queenMsg||foulMsg}
+          </div>
+        </div>
+      )}
+
+      {/* Board */}
+      <div ref={wrapRef} className="relative flex-1 flex items-center justify-center min-h-0 px-2 py-1">
+        <div className="relative rounded-[2rem] overflow-hidden shadow-[0_20px_60px_rgba(0,0,0,0.8)]">
+          <canvas ref={boardRef} className="block touch-none" style={{display:'block'}}/>
+          <canvas ref={aimRef}   className="block touch-none absolute inset-0 pointer-events-none" style={{zIndex:2}}/>
+          {/* input capture */}
+          <div className="absolute inset-0" style={{zIndex:3,touchAction:'none'}}
+            onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerLeave={onUp}/>
+        </div>
+      </div>
+
+      {/* Power + hint */}
+      <div className="px-4 pt-2 pb-3 shrink-0 flex flex-col items-center gap-1.5">
+        <div className="flex items-center gap-2 w-full max-w-[280px]">
+          <span className="text-[9px] text-gray-600 font-bold w-7">PWR</span>
+          <div className="flex-1 h-2 bg-gray-700/60 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-75" style={{
+              width:`${pwr100}%`,
+              background:power>0.75?'#ef4444':power>0.42?'#f59e0b':'#10b981'
+            }}/>
+          </div>
+          <span className="text-[9px] text-gray-500 w-7 text-right tabular-nums">{pwr100}%</span>
+        </div>
+        <p className="text-[10px] text-gray-500 font-bold tracking-widest uppercase text-center leading-tight">
+          {isMoving.current?'⚡ Moving…':
+           mode==='bot'&&turn==='p2'?'🤖 AI thinking…':
+           !isMyTurn?'⏳ Opponent ki turn…':
+           'Lane tap = striker slide  ·  Drag striker = aim & shoot'}
+        </p>
+      </div>
+
+      {/* Win overlay */}
+      {winner&&(
+        <div className="absolute inset-0 bg-black/88 flex flex-col items-center justify-center z-50 backdrop-blur-md p-6">
+          <Crown className="w-20 h-20 text-yellow-400 animate-bounce mb-4 drop-shadow-[0_0_24px_rgba(234,179,8,0.7)]"/>
+          <h2 className="text-5xl font-black mb-1" style={{color:P_COLORS[winner]}}>{pName(winner)}</h2>
+          <p className="text-2xl font-bold text-white mb-1">Jeet Gaya! 🎉</p>
+          <p className="text-gray-400 text-sm mb-7">{scores.p1} – {scores.p2}</p>
+          <div className="flex gap-3">
+            <button onClick={()=>startGame(mode==='online_playing'?'menu':mode)}
+              className="bg-indigo-600 hover:bg-indigo-500 font-bold py-3 px-8 rounded-2xl active:scale-95 transition">
+              Again
+            </button>
+            <button onClick={()=>{stopLoop();clearTimer2();onGameOver(scores[winner],'Win');}}
+              className="bg-gray-700 hover:bg-gray-600 font-bold py-3 px-8 rounded-2xl active:scale-95 transition">
+              Hub
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
