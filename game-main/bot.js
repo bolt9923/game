@@ -5,7 +5,6 @@ import { getDatabase, ref, onValue, off, get } from 'firebase/database';
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const WEBAPP_URL = process.env.WEBAPP_URL || process.env.APP_URL;
 
-// ── Firebase ──────────────────────────────────────────────────────────────────
 function getDb() {
   const config = {
     apiKey:            process.env.VITE_FIREBASE_API_KEY,
@@ -20,134 +19,116 @@ function getDb() {
   return getDatabase(app);
 }
 
-const GAME_EMOJI = {
-  ludo:'🎲', chess:'♟️', carrom:'🎳',
-  tictactoe:'❌', rps:'✊', wordchain:'🔤',
-  emojiquiz:'😂', word:'📝', reaction:'⚡',
-};
-const GAME_NAME = {
-  ludo:'Ludo Plus', chess:'Chess', carrom:'Carrom',
-  tictactoe:'Tic Tac Toe', rps:'Rock Paper Scissors',
-  wordchain:'Word Chain', emojiquiz:'Emoji Quiz',
-  word:'Word Guess', reaction:'Speed Catch',
-};
-const LUDO_COLOR_EMOJI = { red:'🔴', green:'🟢', yellow:'🟡', blue:'🔵' };
+const GAME_EMOJI = { ludo:'🎲', chess:'♟️', carrom:'🎳', tictactoe:'❌', rps:'✊', wordchain:'🔤', emojiquiz:'😂', word:'📝', reaction:'⚡' };
+const GAME_NAME  = { ludo:'Ludo Plus', chess:'Chess', carrom:'Carrom', tictactoe:'Tic Tac Toe', rps:'Rock Paper Scissors', wordchain:'Word Chain', emojiquiz:'Emoji Quiz', word:'Word Guess', reaction:'Speed Catch' };
+const LUDO_COLOR = { red:'🔴', green:'🟢', yellow:'🟡', blue:'🔵' };
 
-// ── Room watcher — join/start/winner notifications ────────────────────────────
+// ── Room notifications ────────────────────────────────────────────────────────
 function watchRoom(bot, roomCode, chatId, gameId) {
   const db = getDb();
-  const fns = [];
-  const roomRef = ref(db, `rooms/${roomCode}`);
-  let knownPlayers = new Set();
+  const unsubs = [];
+  const knownPlayers = new Set();
   let gameStarted = false;
 
-  const roomHandler = onValue(roomRef, async (snap) => {
+  // Players join + game start
+  const rRef = ref(db, `rooms/${roomCode}`);
+  const rHandler = onValue(rRef, async (snap) => {
     if (!snap.exists()) return;
     const val = snap.val();
-    const playerList = val.players ? Object.values(val.players) : [];
+    const players = val.players ? Object.values(val.players) : [];
 
-    // Naye player join notification
-    for (const p of playerList) {
+    for (const p of players) {
       if (!knownPlayers.has(p.id)) {
         knownPlayers.add(p.id);
         if (knownPlayers.size > 1) {
           try {
             await bot.telegram.sendMessage(chatId,
-              `✅ *${p.name}* room mein join ho gaya!\n👥 ${playerList.length}/${val.max_players} players`,
-              { parse_mode: 'Markdown' }
-            );
-          } catch (e) { console.error('[bot] join notify:', e.message); }
+              `✅ *${p.name}* room mein join ho gaya!\n👥 ${players.length}/${val.max_players} players`,
+              { parse_mode: 'Markdown' });
+          } catch(e) { console.error('[bot] join notify:', e.message); }
         }
       }
     }
 
-    // Game start notification
     if (val.status === 'playing' && !gameStarted) {
       gameStarted = true;
-      const names = playerList.map(p => `• ${p.name}`).join('\n');
-      const emoji = GAME_EMOJI[val.game_id] || '🎮';
-      const name = GAME_NAME[val.game_id] || val.game_id;
+      const names = players.map(p => `• ${p.name}`).join('\n');
       try {
         await bot.telegram.sendMessage(chatId,
-          `🚀 *${name} — Game Shuru!*\n\n*Players:*\n${names}\n\nAll the best! 🎉`,
-          { parse_mode: 'Markdown' }
-        );
-      } catch (e) { console.error('[bot] start notify:', e.message); }
+          `🚀 *${GAME_NAME[gameId] || gameId} — Game Shuru!*\n\n*Players:*\n${names}\n\nAll the best! 🎉`,
+          { parse_mode: 'Markdown' });
+      } catch(e) { console.error('[bot] start notify:', e.message); }
     }
   });
-  fns.push(() => off(roomRef, 'value', roomHandler));
+  unsubs.push(() => off(rRef, 'value', rHandler));
 
   // Ludo winner
-  const ludoRef = ref(db, `gamestate/${roomCode}/ludo_sync_${roomCode}`);
-  let lastLudoWinner = null;
-  const ludoHandler = onValue(ludoRef, async (snap) => {
+  const lRef = ref(db, `gamestate/${roomCode}/ludo_sync_${roomCode}`);
+  let lastLudoWin = null;
+  const lHandler = onValue(lRef, async (snap) => {
     if (!snap.exists()) return;
-    const data = snap.val()?.payload ?? snap.val();
-    if (data.winner && data.winner !== lastLudoWinner) {
-      lastLudoWinner = data.winner;
+    const d = snap.val()?.payload ?? snap.val();
+    if (d.winner && d.winner !== lastLudoWin) {
+      lastLudoWin = d.winner;
       try {
-        const rSnap = await get(ref(db, `rooms/${roomCode}`));
-        const players = Object.values(rSnap.val()?.players || {});
-        const roleMap = ['red','yellow','blue','green'];
-        const winnerName = players[roleMap.indexOf(data.winner)]?.name || data.winner;
-        const e = LUDO_COLOR_EMOJI[data.winner] || '🏆';
+        const rs = await get(ref(db, `rooms/${roomCode}`));
+        const pl = Object.values(rs.val()?.players || {});
+        const wName = pl[['red','yellow','blue','green'].indexOf(d.winner)]?.name || d.winner;
         await bot.telegram.sendMessage(chatId,
-          `${e} 🏆 *WINNER: ${winnerName}!*\n\n🎲 Ludo khatam! Congratulations! 🎉`,
-          { parse_mode: 'Markdown' }
-        );
-        fns.forEach(f => f()); // cleanup
-      } catch (e) { console.error('[bot] ludo winner:', e.message); }
+          `${LUDO_COLOR[d.winner]||'🏆'} 🏆 *WINNER: ${wName}!*\n\n🎲 Ludo khatam! Congratulations! 🎉`,
+          { parse_mode: 'Markdown' });
+        unsubs.forEach(f => f());
+      } catch(e) { console.error('[bot] ludo win:', e.message); }
     }
   });
-  fns.push(() => off(ludoRef, 'value', ludoHandler));
+  unsubs.push(() => off(lRef, 'value', lHandler));
 
   // Chess winner
-  const chessRef = ref(db, `gamestate/${roomCode}/chess_sync_state`);
-  let lastChessWinner = null;
-  const chessHandler = onValue(chessRef, async (snap) => {
+  const cRef = ref(db, `gamestate/${roomCode}/chess_sync_state`);
+  let lastChessWin = null;
+  const cHandler = onValue(cRef, async (snap) => {
     if (!snap.exists()) return;
-    const data = snap.val()?.payload ?? snap.val();
-    if (data.winner && data.winner !== lastChessWinner) {
-      lastChessWinner = data.winner;
+    const d = snap.val()?.payload ?? snap.val();
+    if (d.winner && d.winner !== lastChessWin) {
+      lastChessWin = d.winner;
       try {
-        const rSnap = await get(ref(db, `rooms/${roomCode}`));
-        const players = Object.values(rSnap.val()?.players || {});
-        const winnerName = data.winner === 'white' ? players[0]?.name || 'White' : players[1]?.name || 'Black';
+        const rs = await get(ref(db, `rooms/${roomCode}`));
+        const pl = Object.values(rs.val()?.players || {});
+        const wName = d.winner === 'white' ? pl[0]?.name||'White' : pl[1]?.name||'Black';
         await bot.telegram.sendMessage(chatId,
-          `♟️ 🏆 *WINNER: ${winnerName}!*\n\nChess khatam! Congratulations! 🎉`,
-          { parse_mode: 'Markdown' }
-        );
-        fns.forEach(f => f());
-      } catch (e) { console.error('[bot] chess winner:', e.message); }
+          `♟️ 🏆 *WINNER: ${wName}!*\n\nChess khatam! Congratulations! 🎉`,
+          { parse_mode: 'Markdown' });
+        unsubs.forEach(f => f());
+      } catch(e) { console.error('[bot] chess win:', e.message); }
     }
   });
-  fns.push(() => off(chessRef, 'value', chessHandler));
+  unsubs.push(() => off(cRef, 'value', cHandler));
 
   // TicTacToe winner
-  const tttRef = ref(db, `gamestate/${roomCode}/tictactoe_move`);
-  let lastTttWinner = null;
-  const tttHandler = onValue(tttRef, async (snap) => {
+  const tRef = ref(db, `gamestate/${roomCode}/tictactoe_move`);
+  let lastTttWin = null;
+  const tHandler = onValue(tRef, async (snap) => {
     if (!snap.exists()) return;
-    const data = snap.val()?.payload ?? snap.val();
-    if (data.winner && data.winner !== lastTttWinner) {
-      lastTttWinner = data.winner;
+    const d = snap.val()?.payload ?? snap.val();
+    if (d.winner && d.winner !== lastTttWin) {
+      lastTttWin = d.winner;
       try {
-        const rSnap = await get(ref(db, `rooms/${roomCode}`));
-        const players = Object.values(rSnap.val()?.players || {});
-        const msg = data.winner === 'draw'
-          ? `🤝 *TicTacToe Draw!* Koi nahi jeeta!`
-          : `❌ 🏆 *WINNER: ${data.winner === 'X' ? players[0]?.name || 'P1' : players[1]?.name || 'P2'}!*\n\nTicTacToe khatam! 🎉`;
+        const rs = await get(ref(db, `rooms/${roomCode}`));
+        const pl = Object.values(rs.val()?.players || {});
+        const msg = d.winner === 'draw'
+          ? `🤝 *TicTacToe Draw!*`
+          : `❌ 🏆 *WINNER: ${d.winner==='X' ? pl[0]?.name||'P1' : pl[1]?.name||'P2'}!*\n\nTicTacToe khatam! 🎉`;
         await bot.telegram.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
-        fns.forEach(f => f());
-      } catch (e) { console.error('[bot] ttt winner:', e.message); }
+        unsubs.forEach(f => f());
+      } catch(e) { console.error('[bot] ttt win:', e.message); }
     }
   });
-  fns.push(() => off(tttRef, 'value', tttHandler));
+  unsubs.push(() => off(tRef, 'value', tHandler));
 
-  return fns;
+  return unsubs;
 }
 
-// ── Room ready watcher — jab room bane to GC mein announce karo ───────────────
+// ── Watch Firebase for new room then announce in group ────────────────────────
 function watchForRoomReady(bot, chatId, creatorName, gameId) {
   const db = getDb();
   const roomsRef = ref(db, 'rooms');
@@ -155,204 +136,139 @@ function watchForRoomReady(bot, chatId, creatorName, gameId) {
 
   const handler = onValue(roomsRef, async (snap) => {
     if (!snap.exists()) return;
-    const allRooms = snap.val();
-
-    for (const [code, room] of Object.entries(allRooms)) {
+    for (const [code, room] of Object.entries(snap.val())) {
       if (announced.has(code)) continue;
-      const createdAt = new Date(room.created_at).getTime();
-      const isNew = (Date.now() - createdAt) < 20000;
-      const isWaiting = room.status === 'waiting';
-      if (!isNew || !isWaiting || room.game_id !== gameId) continue;
+      if (room.status !== 'waiting') continue;
+      if (room.game_id !== gameId) continue;
+      if ((Date.now() - new Date(room.created_at).getTime()) > 20000) continue;
 
       const players = room.players ? Object.values(room.players) : [];
-      const isCreatorRoom = players.some(p =>
-        p.name === creatorName || (p.name || '').toLowerCase().includes(creatorName.toLowerCase())
+      const isMatch = players.some(p =>
+        p.name === creatorName ||
+        (p.name||'').toLowerCase().includes(creatorName.toLowerCase())
       );
+      if (!isMatch) continue;
 
-      if (isCreatorRoom) {
-        announced.add(code);
-        off(roomsRef, 'value', handler);
+      announced.add(code);
+      off(roomsRef, 'value', handler);
 
-        const emoji = GAME_EMOJI[gameId] || '🎮';
-        const name = GAME_NAME[gameId] || gameId;
-        const joinUrl = `${WEBAPP_URL}?startapp=${code}`;
+      const emoji = GAME_EMOJI[gameId] || '🎮';
+      const name  = GAME_NAME[gameId]  || gameId;
+      const url   = `${WEBAPP_URL}?startapp=${code}`;
 
-        try {
-          await bot.telegram.sendMessage(chatId,
-            `${emoji} *${name} — Room Ready!*\n\n` +
-            `👤 *${creatorName}* ne room banaya\n` +
-            `🔑 Room Code: \`${code}\`\n` +
-            `👥 Players: 1/${room.max_players}\n\n` +
-            `👇 *Button dabao — seedha room mein pohoncho!*`,
-            {
-              parse_mode: 'Markdown',
-              reply_markup: {
-                inline_keyboard: [[
-                  { text: `${emoji} ${name} Join Karo!`, web_app: { url: joinUrl } }
-                ]]
-              }
-            }
-          );
-          // Ab room watch shuru karo
-          watchRoom(bot, code, chatId, gameId);
-        } catch (e) {
-          console.error('[bot] room announce error:', e.message);
-        }
-        return;
-      }
+      console.log(`[bot] Room ${code} ready — announcing in chat ${chatId}`);
+      try {
+        await bot.telegram.sendMessage(chatId,
+          `${emoji} *${name} — Room Ready!*\n\n` +
+          `👤 *${creatorName}* ne room banaya\n` +
+          `🔑 Room Code: \`${code}\`\n` +
+          `👥 Players: 1/${room.max_players}\n\n` +
+          `👇 *Button dabao — seedha room mein pohoncho!*`,
+          {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, web_app: { url } }]] }
+          }
+        );
+        watchRoom(bot, code, chatId, gameId);
+      } catch(e) { console.error('[bot] announce error:', e.message); }
+      return;
     }
   });
 
-  // 3 min baad cleanup
   setTimeout(() => off(roomsRef, 'value', handler), 3 * 60 * 1000);
 }
 
-// ── Bot ───────────────────────────────────────────────────────────────────────
+// ── Main bot ──────────────────────────────────────────────────────────────────
 export function startBot() {
-  if (!TOKEN) { console.warn('[bot] No TOKEN'); return null; }
-  if (!WEBAPP_URL?.startsWith('https://')) { console.warn('[bot] Bad WEBAPP_URL:', WEBAPP_URL); return null; }
+  if (!TOKEN)                          { console.warn('[bot] No TOKEN');        return null; }
+  if (!WEBAPP_URL?.startsWith('https')){ console.warn('[bot] Bad WEBAPP_URL');  return null; }
 
   const bot = new Telegraf(TOKEN);
 
-  // Debug middleware — SABSE PEHLE register karo
+  // 1. Debug middleware — FIRST
   bot.use(async (ctx, next) => {
-    const type = ctx.updateType;
-    const text = ctx.message?.text || '';
-    const from = ctx.from?.username || ctx.from?.first_name || 'unknown';
-    const chat = ctx.chat?.title || ctx.chat?.type || '';
-    console.log(`[bot] update: ${type} | from:${from} | chat:${chat} | text:${text.slice(0,80)}`);
+    const from = ctx.from?.username || ctx.from?.first_name || '?';
+    const chat = ctx.chat?.title || ctx.chat?.type || '?';
+    const text = ctx.message?.text || ctx.message?.web_app_data?.data?.slice(0,40) || ctx.updateType;
+    console.log(`[bot] ${ctx.updateType} | from:${from} | chat:${chat} | ${text}`);
     return next();
   });
 
-  // /start
+  // 2. /start
   bot.start(async (ctx) => {
-    const roomCode = (ctx.startPayload?.length === 6) ? ctx.startPayload.toUpperCase() : '';
+    const code = ctx.startPayload?.length === 6 ? ctx.startPayload.toUpperCase() : '';
     const name = ctx.from.first_name || 'Player';
-    const url = roomCode ? `${WEBAPP_URL}?startapp=${roomCode}` : WEBAPP_URL;
-
-    if (roomCode) {
+    const url  = code ? `${WEBAPP_URL}?startapp=${code}` : WEBAPP_URL;
+    if (code) {
       await ctx.reply(
-        `🎮 *${name}, room \`${roomCode}\` join karo!*\n\n👇 Button dabao — seedha room mein pohoncho`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[{ text: '🎮 Seedha Join Karo!', web_app: { url } }]] }
-        }
+        `🎮 *${name}, room \`${code}\` join karo!*\n\n👇 Button dabao`,
+        { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:'🎮 Seedha Join Karo!', web_app:{ url } }]] } }
       );
     } else {
       await ctx.reply(
         `🎮 *GameSphere mein swagat hai, ${name}!* 🎉\n\n` +
-        `Apne dosto ke saath multiplayer games khelo:\n` +
-        `🎲 Ludo • ♟️ Chess • 🎳 Carrom • ❌ TicTacToe\n\n` +
-        `📢 *Group mein kaise khele:*\n` +
-        `1. Bot ko group mein add karo\n` +
-        `2. \`/game\` type karo\n` +
-        `3. Room banao — link group mein aayega\n` +
-        `4. Sab milke join karo aur khelo! 🎉`,
-        {
-          parse_mode: 'Markdown',
-          reply_markup: { inline_keyboard: [[{ text: '🎮 Game Lobby Kholo', web_app: { url } }]] }
-        }
+        `Dosto ke saath khelo: 🎲 Ludo • ♟️ Chess • 🎳 Carrom • ❌ TicTacToe\n\n` +
+        `📢 *Group mein:* \`/game\` type karo → room banao → sab join karo!`,
+        { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:'🎮 Game Lobby Kholo', web_app:{ url } }]] } }
       );
     }
   });
 
-  // /game
+  // 3. /game
   bot.command('game', async (ctx) => {
-    const parts = ctx.message.text.trim().split(/\s+/);
-    const gameArg = parts[1]?.toLowerCase();
+    const arg = ctx.message.text.trim().split(/\s+/)[1]?.toLowerCase();
+    const gameId = GAME_NAME[arg] ? arg : 'ludo';
+    const emoji  = GAME_EMOJI[gameId];
+    const name   = GAME_NAME[gameId];
     const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-    const chatId = ctx.chat.id;
-
-    const gameId = GAME_NAME[gameArg] ? gameArg : 'ludo';
-    const emoji = GAME_EMOJI[gameId] || '🎮';
-    const name = GAME_NAME[gameId] || 'Game';
     const creatorName = ctx.from.first_name || ctx.from.username || 'Player';
-    const creator = ctx.from.username ? `@${ctx.from.username}` : creatorName;
-    const gameUrl = `${WEBAPP_URL}?game=${gameId}&from=group`;
+    const creator     = ctx.from.username ? `@${ctx.from.username}` : creatorName;
+    const gameUrl     = `${WEBAPP_URL}?game=${gameId}&from=group`;
 
     if (isGroup) {
-      watchForRoomReady(bot, chatId, creatorName, gameId);
+      console.log(`[bot] Watching for room: game=${gameId} creator=${creatorName} chat=${ctx.chat.id}`);
+      watchForRoomReady(bot, ctx.chat.id, creatorName, gameId);
     }
 
     await ctx.reply(
       `${emoji} *${creator} — ${name} room banao!*\n\n` +
       `Button dabao → game khulega → *Create Room* dabao\n` +
       `Room bante hi group mein join link aa jaayega! 🚀`,
-      {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          inline_keyboard: [[
-            { text: `${emoji} ${name} — Room Banao`, web_app: { url: gameUrl } }
-          ]]
-        }
-      }
+      { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:`${emoji} ${name} — Room Banao`, web_app:{ url:gameUrl } }]] } }
     );
   });
 
-  // /help
-  bot.command('help', (ctx) =>
-    ctx.reply(
-      '🎮 *GameSphere Commands*\n\n' +
-      '`/game` — Ludo room banao\n' +
-      '`/game chess` — Chess\n' +
-      '`/game carrom` — Carrom\n' +
-      '`/game tictactoe` — TicTacToe\n' +
-      '`/game rps` — Rock Paper Scissors\n' +
-      '`/game wordchain` — Word Chain\n\n' +
-      '📢 Room bante hi group mein join link aayega!\n' +
-      '🏆 Winner ka announcement bhi group mein aayega!',
-      { parse_mode: 'Markdown' }
-    )
-  );
+  // 4. /help
+  bot.command('help', (ctx) => ctx.reply(
+    '🎮 *GameSphere Commands*\n\n' +
+    '`/game` — Ludo\n`/game chess` — Chess\n`/game carrom` — Carrom\n' +
+    '`/game tictactoe` — TicTacToe\n`/game rps` — RPS\n\n' +
+    '📢 Room bante hi group mein join link aayega!\n🏆 Winner bhi announce hoga!',
+    { parse_mode:'Markdown' }
+  ));
 
-  // WebApp sendData — jab user app se room banaye
+  // 5. web_app_data — jab app se room bane
   bot.on('message', async (ctx) => {
-    if (!ctx.message?.web_app_data?.data) return; // sirf web_app_data handle karo
-    if (ctx.message?.web_app_data?.data) {
-      try {
-        const data = JSON.parse(ctx.message.web_app_data.data);
-        if (data.type === 'room_created') {
-          const { code, gameId, hostName, maxPlayers } = data;
-          const chatId = ctx.chat.id;
-          const emoji = GAME_EMOJI[gameId] || '🎮';
-          const name = GAME_NAME[gameId] || gameId;
-          const joinUrl = `${WEBAPP_URL}?startapp=${code}`;
-          const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
-
-          watchRoom(bot, code, chatId, gameId);
-
-          await bot.telegram.sendMessage(chatId,
-            `${emoji} *${name} — Room Ready!*\n\n` +
-            `👤 *${creator}* ne room banaya\n` +
-            `🔑 Room Code: \`${code}\`\n` +
-            `👥 Players: 1/${maxPlayers}\n\n` +
-            `👇 *Button dabao — seedha room mein pohoncho!*`,
-            {
-              parse_mode: 'Markdown',
-              reply_markup: {
-                inline_keyboard: [[
-                  { text: `${emoji} ${name} Join Karo!`, web_app: { url: joinUrl } }
-                ]]
-              }
-            }
-          );
-        }
-      } catch (e) {
-        console.error('[bot] web_app_data error:', e.message);
+    const data = ctx.message?.web_app_data?.data;
+    if (!data) return;
+    try {
+      const payload = JSON.parse(data);
+      if (payload.type === 'room_created') {
+        const { code, gameId, hostName, maxPlayers } = payload;
+        const chatId  = ctx.chat.id;
+        const emoji   = GAME_EMOJI[gameId] || '🎮';
+        const name    = GAME_NAME[gameId]  || gameId;
+        const url     = `${WEBAPP_URL}?startapp=${code}`;
+        const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
+        watchRoom(bot, code, chatId, gameId);
+        await bot.telegram.sendMessage(chatId,
+          `${emoji} *${name} — Room Ready!*\n\n` +
+          `👤 *${creator}* ne room banaya\n🔑 Room Code: \`${code}\`\n👥 Players: 1/${maxPlayers}\n\n` +
+          `👇 *Button dabao — seedha room mein pohoncho!*`,
+          { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:`${emoji} ${name} Join Karo!`, web_app:{ url } }]] } }
+        );
       }
-    }
-  });
-
-
-
-  // Debug — log all incoming updates
-  bot.use((ctx, next) => {
-    const type = ctx.updateType;
-    const text = ctx.message?.text || ctx.message?.web_app_data?.data || '';
-    const from = ctx.from?.username || ctx.from?.first_name || 'unknown';
-    const chat = ctx.chat?.title || ctx.chat?.type || '';
-    console.log(`[bot] update: ${type} | from: ${from} | chat: ${chat} | text: ${text.slice(0,50)}`);
-    return next();
+    } catch(e) { console.error('[bot] web_app_data:', e.message); }
   });
 
   bot.catch((err) => console.error('[bot] error:', err.message));
