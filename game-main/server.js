@@ -16,11 +16,13 @@ app.use(express.static(path.join(__dirname, 'dist')));
 
 // Telegram webhook endpoint
 app.post(`/webhook/${TOKEN}`, (req, res) => {
-  res.sendStatus(200); // pehle 200 do
+  res.sendStatus(200);
   if (global.botInstance) {
     global.botInstance.handleUpdate(req.body).catch((e) =>
       console.error('[webhook] handleUpdate error:', e.message)
     );
+  } else {
+    console.warn('[webhook] botInstance not ready yet');
   }
 });
 
@@ -28,28 +30,37 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-app.listen(PORT, async () => {
-  console.log(`Server is running on port ${PORT}`);
-
+async function initBot() {
   if (!TOKEN || !WEBAPP_URL) {
     console.log('[bot] TOKEN ya WEBAPP_URL missing — bot skip');
     return;
   }
-
   try {
     const { startBot } = await import('./bot.js');
     const bot = startBot();
-    if (bot) {
-      global.botInstance = bot;
+    if (!bot) { console.error('[bot] startBot null return kiya'); return; }
+    global.botInstance = bot;
 
-      // Webhook set karo
-      const webhookUrl = `${WEBAPP_URL}/webhook/${TOKEN}`;
-      await bot.telegram.setWebhook(webhookUrl);
-      console.log('[bot] ✅ Webhook set:', webhookUrl);
-    }
+    // Pehle purana webhook delete karo
+    await bot.telegram.deleteWebhook();
+
+    // Naya webhook set karo
+    const webhookUrl = `${WEBAPP_URL}/webhook/${TOKEN}`;
+    await bot.telegram.setWebhook(webhookUrl, { drop_pending_updates: true });
+    console.log('[bot] ✅ Webhook set:', webhookUrl);
+
+    // Bot info
+    const me = await bot.telegram.getMe();
+    console.log(`[bot] ✅ Bot running: @${me.username}`);
+
   } catch (e) {
-    console.error('[bot] Error:', e.message);
+    console.error('[bot] Init error:', e.message);
   }
+}
+
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+  initBot();
 });
 
 process.on('uncaughtException', (err) => {
