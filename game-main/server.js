@@ -15,14 +15,17 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // Telegram webhook endpoint
+const updateQueue = [];
 app.post(`/webhook/${TOKEN}`, (req, res) => {
   res.sendStatus(200);
+  const update = req.body;
   if (global.botInstance) {
-    global.botInstance.handleUpdate(req.body).catch((e) =>
+    global.botInstance.handleUpdate(update).catch((e) =>
       console.error('[webhook] handleUpdate error:', e.message)
     );
   } else {
-    console.warn('[webhook] botInstance not ready yet');
+    console.warn('[webhook] botInstance not ready — queueing update');
+    updateQueue.push(update);
   }
 });
 
