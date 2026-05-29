@@ -47,6 +47,7 @@ export default function App() {
   ]);
   const [copiedId, setCopiedId] = useState(false);
   const [autoJoinCode, setAutoJoinCode] = useState<string | null>(null);
+  const [groupChatId, setGroupChatId] = useState<string | null>(null);
 
   // ✅ Telegram bot link se aaye room code ya game param handle karo
   useEffect(() => {
@@ -68,6 +69,8 @@ export default function App() {
     // Method 3: ?game=ludo — seedha multiplayer create screen pe jao
     const gameParam = params.get('game');
     const fromGroup = params.get('from') === 'group';
+    const chatIdParam = params.get('chatId');
+    if (chatIdParam) setGroupChatId(chatIdParam);
     if (gameParam && fromGroup) {
       setView('multiplayer');
     }
@@ -629,6 +632,7 @@ export default function App() {
                   onLaunch={handleRoomLaunch}
                   onBack={() => setView('home')}
                   autoJoinCode={autoJoinCode ?? undefined}
+                  groupChatId={groupChatId ?? undefined}
                 />
               </motion.div>
             ) : view === 'leaderboard' ? (
