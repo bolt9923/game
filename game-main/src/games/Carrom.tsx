@@ -298,6 +298,10 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   // Grace: 0=no queen pending, 1=queen pocketed this shot (get one more shot), -1=grace used
   const queenGraceRef      = useRef(0);
 
+  // Online: true while physics is running for an OPPONENT's received strike.
+  // Prevents afterShot from running on the receiver side — only the shooter resolves turn logic.
+  const isReceivedStrikeRef = useRef(false);
+
   // Input refs
   const strikerSlideRef  = useRef(0.5);
   const isDraggingRef    = useRef(false);
@@ -783,6 +787,13 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
       });
       if (!moving) {
         isMovingRef.current = false;
+        // In online mode: if this physics was triggered by opponent's strike,
+        // skip afterShot locally — shooter already resolved and will sync turn via sync_state.
+        if (modeRef.current === 'online_playing' && isReceivedStrikeRef.current) {
+          isReceivedStrikeRef.current = false;
+          return; // canShootRef stays false until sync_state arrives with our turn
+        }
+        isReceivedStrikeRef.current = false;
         setTimeout(afterShot, 250);
       }
     });
@@ -970,7 +981,13 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     extraTurnRef.current = false;
 
     resetStriker();
-    canShootRef.current = true;
+    // Online: only allow shooting if it's now THIS client's turn.
+    // In local/bot modes always allow (turn visual handles it).
+    if (modeRef.current === 'online_playing') {
+      canShootRef.current = roleRef.current === turnRef.current;
+    } else {
+      canShootRef.current = true;
+    }
 
     // Online sync
     if (modeRef.current==='online_playing' && roomIdRef.current) {
@@ -1128,15 +1145,24 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     if (mode!=='online_playing'||!roomId) return;
     const unsub = mockBackend.subscribe(('carrom_sync_'+roomId) as any, (data:any) => {
       if (data.type==='strike') {
+        // Ignore echo of our own shot
         if (data.shooter===roleRef.current) return;
+        // Only apply if it's currently the opponent's turn (not ours)
         if (turnRef.current!==roleRef.current&&strikerRef.current&&canShootRef.current) {
           canShootRef.current=false; isMovingRef.current=true;
+          isReceivedStrikeRef.current=true; // mark: physics from opponent, skip afterShot
           Matter.Body.setPosition(strikerRef.current,data.position);
           Matter.Body.applyForce(strikerRef.current,data.position,data.force);
         }
       } else if (data.type==='sync_state') {
         if (data.scores) { setScores(data.scores); scoresRef.current=data.scores; }
-        if (data.turn)   { setTurn(data.turn); turnRef.current=data.turn; }
+        if (data.turn) {
+          setTurn(data.turn); turnRef.current=data.turn;
+          // Now that authoritative turn is received, allow shooting only if it's our turn
+          canShootRef.current = roleRef.current === data.turn;
+          isMovingRef.current = false;
+          isReceivedStrikeRef.current = false;
+        }
         if (data.winner) setWinner(data.winner);
       }
     });
@@ -1298,6 +1324,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     setConsecFouls({p1:0,p2:0,p3:0,p4:0}); consecFoulsRef.current={p1:0,p2:0,p3:0,p4:0};
     setDisqualified(new Set()); disqRef.current=new Set();
     canShootRef.current=true; isMovingRef.current=false;
+    isReceivedStrikeRef.current=false;
     extraTurnRef.current=false; foulThisTurnRef.current=false;
     strikerPocketedRef.current=false; ownCoinPocketedRef.current=false;
     oppCoinPocketedRef.current=false;
