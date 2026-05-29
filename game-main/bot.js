@@ -346,8 +346,9 @@ export function startBot() {
   );
 
   bot.catch((err) => console.error('[bot] error:', err.message));
-  bot.launch().then(() => console.log('[bot] ✅ GameSphere Bot Started!'));
-  process.once('SIGINT', () => bot.stop('SIGINT'));
-  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+  // Webhook mode — polling nahi, server se handle hoga
+  // Bot sirf return karo — server.js webhook set karega
+  console.log('[bot] Bot instance ready (webhook mode)');
   return bot;
 }
