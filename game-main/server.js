@@ -19,6 +19,7 @@ const updateQueue = [];
 app.post(`/webhook/${TOKEN}`, (req, res) => {
   res.sendStatus(200);
   const update = req.body;
+  console.log('[webhook] received update:', JSON.stringify(update).slice(0, 200));
   if (global.botInstance) {
     global.botInstance.handleUpdate(update).catch((e) =>
       console.error('[webhook] handleUpdate error:', e.message)
