@@ -23,14 +23,13 @@ const GAME_EMOJI = { ludo:'🎲', chess:'♟️', carrom:'🎳', tictactoe:'❌'
 const GAME_NAME  = { ludo:'Ludo Plus', chess:'Chess', carrom:'Carrom', tictactoe:'Tic Tac Toe', rps:'Rock Paper Scissors', wordchain:'Word Chain', emojiquiz:'Emoji Quiz', word:'Word Guess', reaction:'Speed Catch' };
 const LUDO_COLOR = { red:'🔴', green:'🟢', yellow:'🟡', blue:'🔵' };
 
-// ── Room notifications ────────────────────────────────────────────────────────
+// ── Room game-end watchers ────────────────────────────────────────────────────
 function watchRoom(bot, roomCode, chatId, gameId) {
   const db = getDb();
   const unsubs = [];
   const knownPlayers = new Set();
   let gameStarted = false;
 
-  // Players join + game start
   const rRef = ref(db, `rooms/${roomCode}`);
   const rHandler = onValue(rRef, async (snap) => {
     if (!snap.exists()) return;
@@ -128,33 +127,36 @@ function watchRoom(bot, roomCode, chatId, gameId) {
   return unsubs;
 }
 
-// Helper: build inline button — web_app only works in private chat, use url in groups
-function joinButton(emoji, name, url, chatType) {
-  const isGroup = chatType === 'group' || chatType === 'supergroup';
-  const btn = isGroup
-    ? { text: `${emoji} ${name} Join Karo!`, url }
-    : { text: `${emoji} ${name} Join Karo!`, web_app: { url } };
-  return { inline_keyboard: [[btn]] };
-}
-
-// ── Watch Firebase for new room then announce in group ────────────────────────
+// ── Watch Firebase for new room — announce in group when room appears ─────────
+// FIX: Removed the 20-second timing window that caused rooms to be missed.
+//      Now watches for 5 minutes and matches any new room by this creator/game.
+//      Uses url buttons (not web_app) because web_app buttons are banned in groups.
 function watchForRoomReady(bot, chatId, creatorName, gameId) {
   const db = getDb();
   const roomsRef = ref(db, 'rooms');
   const announced = new Set();
+  const startTime = Date.now();
+  const WATCH_MS = 5 * 60 * 1000; // 5 minutes
+
+  console.log(`[bot] Watching for room: game=${gameId} creator=${creatorName} chat=${chatId}`);
 
   const handler = onValue(roomsRef, async (snap) => {
     if (!snap.exists()) return;
+
     for (const [code, room] of Object.entries(snap.val())) {
       if (announced.has(code)) continue;
       if (room.status !== 'waiting') continue;
       if (room.game_id !== gameId) continue;
-      if ((Date.now() - new Date(room.created_at).getTime()) > 20000) continue;
+
+      // Only consider rooms created after the /game command was sent
+      const roomAge = Date.now() - new Date(room.created_at).getTime();
+      if (roomAge > WATCH_MS) continue; // skip old rooms
+      if (new Date(room.created_at).getTime() < startTime - 5000) continue; // must be fresh
 
       const players = room.players ? Object.values(room.players) : [];
       const isMatch = players.some(p =>
         p.name === creatorName ||
-        (p.name||'').toLowerCase().includes(creatorName.toLowerCase())
+        (p.name || '').toLowerCase().includes(creatorName.toLowerCase().split(' ')[0])
       );
       if (!isMatch) continue;
 
@@ -165,17 +167,19 @@ function watchForRoomReady(bot, chatId, creatorName, gameId) {
       const name  = GAME_NAME[gameId]  || gameId;
       const url   = `${WEBAPP_URL}?startapp=${code}`;
 
-      console.log(`[bot] Room ${code} ready — announcing in chat ${chatId}`);
+      console.log(`[bot] ✅ Room ${code} found — announcing in chat ${chatId}`);
       try {
-        // Groups don't support web_app buttons — use plain url button instead
-        const reply_markup = { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, url }]] };
+        // Groups do NOT support web_app buttons → use plain url button
         await bot.telegram.sendMessage(chatId,
           `${emoji} *${name} — Room Ready!*\n\n` +
           `👤 *${creatorName}* ne room banaya\n` +
           `🔑 Room Code: \`${code}\`\n` +
           `👥 Players: 1/${room.max_players}\n\n` +
           `👇 *Button dabao — seedha room mein pohoncho!*`,
-          { parse_mode: 'Markdown', reply_markup }
+          {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, url }]] }
+          }
         );
         watchRoom(bot, code, chatId, gameId);
       } catch(e) { console.error('[bot] announce error:', e.message); }
@@ -183,7 +187,11 @@ function watchForRoomReady(bot, chatId, creatorName, gameId) {
     }
   });
 
-  setTimeout(() => off(roomsRef, 'value', handler), 3 * 60 * 1000);
+  // Stop watching after 5 minutes
+  setTimeout(() => {
+    off(roomsRef, 'value', handler);
+    console.log(`[bot] Stopped watching for ${gameId} room by ${creatorName}`);
+  }, WATCH_MS);
 }
 
 // ── Main bot ──────────────────────────────────────────────────────────────────
@@ -193,7 +201,7 @@ export function startBot() {
 
   const bot = new Telegraf(TOKEN);
 
-  // 1. Debug middleware — FIRST
+  // 1. Debug middleware
   bot.use(async (ctx, next) => {
     const from = ctx.from?.username || ctx.from?.first_name || '?';
     const chat = ctx.chat?.title || ctx.chat?.type || '?';
@@ -202,9 +210,9 @@ export function startBot() {
     return next();
   });
 
-  // 2. /start
+  // 2. /start — private chat only, web_app button is fine here
   bot.start(async (ctx) => {
-    const code = ctx.startPayload?.length === 6 ? ctx.startPayload.toUpperCase() : '';
+    const code = ctx.startPayload?.length >= 4 ? ctx.startPayload.toUpperCase() : '';
     const name = ctx.from.first_name || 'Player';
     const url  = code ? `${WEBAPP_URL}?startapp=${code}` : WEBAPP_URL;
     if (code) {
@@ -222,7 +230,7 @@ export function startBot() {
     }
   });
 
-  // 3. /game
+  // 3. /game — works in groups; starts Firebase watcher, sends url button (not web_app)
   bot.command('game', async (ctx) => {
     const arg = ctx.message.text.trim().split(/\s+/)[1]?.toLowerCase();
     const gameId = GAME_NAME[arg] ? arg : 'ludo';
@@ -234,14 +242,15 @@ export function startBot() {
     const gameUrl     = `${WEBAPP_URL}?game=${gameId}&from=group`;
 
     if (isGroup) {
-      console.log(`[bot] Watching for room: game=${gameId} creator=${creatorName} chat=${ctx.chat.id}`);
+      // Start watching Firebase for the room this user is about to create
       watchForRoomReady(bot, ctx.chat.id, creatorName, gameId);
     }
 
-    // web_app buttons don't work in groups — use url button there
+    // Groups can't use web_app buttons — use url button instead
     const btn = isGroup
       ? { text: `${emoji} ${name} — Room Banao`, url: gameUrl }
       : { text: `${emoji} ${name} — Room Banao`, web_app: { url: gameUrl } };
+
     await ctx.reply(
       `${emoji} *${creator} — ${name} room banao!*\n\n` +
       `Button dabao → game khulega → *Create Room* dabao\n` +
@@ -259,7 +268,7 @@ export function startBot() {
     { parse_mode:'Markdown' }
   ));
 
-  // 5. web_app_data — jab app se room bane
+  // 5. web_app_data — optional fallback if app ever calls Telegram.WebApp.sendData()
   bot.on('message', async (ctx) => {
     const data = ctx.message?.web_app_data?.data;
     if (!data) return;
@@ -273,13 +282,12 @@ export function startBot() {
         const url     = `${WEBAPP_URL}?startapp=${code}`;
         const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
         watchRoom(bot, code, chatId, gameId);
-        // Groups require url buttons, not web_app buttons
-        const reply_markup = { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, url }]] };
+        // Use url button (safe for all chat types)
         await bot.telegram.sendMessage(chatId,
           `${emoji} *${name} — Room Ready!*\n\n` +
           `👤 *${creator}* ne room banaya\n🔑 Room Code: \`${code}\`\n👥 Players: 1/${maxPlayers}\n\n` +
           `👇 *Button dabao — seedha room mein pohoncho!*`,
-          { parse_mode:'Markdown', reply_markup }
+          { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:`${emoji} ${name} Join Karo!`, url }]] } }
         );
       }
     } catch(e) { console.error('[bot] web_app_data:', e.message); }
