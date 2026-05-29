@@ -61,7 +61,6 @@ function watchRoom(bot, roomCode, chatId, gameId) {
   });
   unsubs.push(() => off(rRef, 'value', rHandler));
 
-  // Ludo winner
   const lRef = ref(db, `gamestate/${roomCode}/ludo_sync_${roomCode}`);
   let lastLudoWin = null;
   const lHandler = onValue(lRef, async (snap) => {
@@ -82,7 +81,6 @@ function watchRoom(bot, roomCode, chatId, gameId) {
   });
   unsubs.push(() => off(lRef, 'value', lHandler));
 
-  // Chess winner
   const cRef = ref(db, `gamestate/${roomCode}/chess_sync_state`);
   let lastChessWin = null;
   const cHandler = onValue(cRef, async (snap) => {
@@ -103,7 +101,6 @@ function watchRoom(bot, roomCode, chatId, gameId) {
   });
   unsubs.push(() => off(cRef, 'value', cHandler));
 
-  // TicTacToe winner
   const tRef = ref(db, `gamestate/${roomCode}/tictactoe_move`);
   let lastTttWin = null;
   const tHandler = onValue(tRef, async (snap) => {
@@ -127,90 +124,20 @@ function watchRoom(bot, roomCode, chatId, gameId) {
   return unsubs;
 }
 
-// ── Watch Firebase for new room — announce in group when room appears ─────────
-// FIX: Removed the 20-second timing window that caused rooms to be missed.
-//      Now watches for 5 minutes and matches any new room by this creator/game.
-//      Uses url buttons (not web_app) because web_app buttons are banned in groups.
-function watchForRoomReady(bot, chatId, creatorName, gameId) {
-  const db = getDb();
-  const roomsRef = ref(db, 'rooms');
-  const announced = new Set();
-  const startTime = Date.now();
-  const WATCH_MS = 5 * 60 * 1000; // 5 minutes
-
-  console.log(`[bot] Watching for room: game=${gameId} creator=${creatorName} chat=${chatId}`);
-
-  const handler = onValue(roomsRef, async (snap) => {
-    if (!snap.exists()) return;
-
-    for (const [code, room] of Object.entries(snap.val())) {
-      if (announced.has(code)) continue;
-      if (room.status !== 'waiting') continue;
-      if (room.game_id !== gameId) continue;
-
-      // Only consider rooms created after the /game command was sent
-      const roomAge = Date.now() - new Date(room.created_at).getTime();
-      if (roomAge > WATCH_MS) continue; // skip old rooms
-      if (new Date(room.created_at).getTime() < startTime - 5000) continue; // must be fresh
-
-      const players = room.players ? Object.values(room.players) : [];
-      const isMatch = players.some(p =>
-        p.name === creatorName ||
-        (p.name || '').toLowerCase().includes(creatorName.toLowerCase().split(' ')[0])
-      );
-      if (!isMatch) continue;
-
-      announced.add(code);
-      off(roomsRef, 'value', handler);
-
-      const emoji = GAME_EMOJI[gameId] || '🎮';
-      const name  = GAME_NAME[gameId]  || gameId;
-      const url   = `${WEBAPP_URL}?startapp=${code}`;
-
-      console.log(`[bot] ✅ Room ${code} found — announcing in chat ${chatId}`);
-      try {
-        // Groups do NOT support web_app buttons → use plain url button
-        await bot.telegram.sendMessage(chatId,
-          `${emoji} *${name} — Room Ready!*\n\n` +
-          `👤 *${creatorName}* ne room banaya\n` +
-          `🔑 Room Code: \`${code}\`\n` +
-          `👥 Players: 1/${room.max_players}\n\n` +
-          `👇 *Button dabao — seedha room mein pohoncho!*`,
-          {
-            parse_mode: 'Markdown',
-            reply_markup: { inline_keyboard: [[{ text: `${emoji} ${name} Join Karo!`, url }]] }
-          }
-        );
-        watchRoom(bot, code, chatId, gameId);
-      } catch(e) { console.error('[bot] announce error:', e.message); }
-      return;
-    }
-  });
-
-  // Stop watching after 5 minutes
-  setTimeout(() => {
-    off(roomsRef, 'value', handler);
-    console.log(`[bot] Stopped watching for ${gameId} room by ${creatorName}`);
-  }, WATCH_MS);
-}
-
-// ── Main bot ──────────────────────────────────────────────────────────────────
 export function startBot() {
   if (!TOKEN)                          { console.warn('[bot] No TOKEN');        return null; }
   if (!WEBAPP_URL?.startsWith('https')){ console.warn('[bot] Bad WEBAPP_URL');  return null; }
 
   const bot = new Telegraf(TOKEN);
 
-  // 1. Debug middleware
   bot.use(async (ctx, next) => {
     const from = ctx.from?.username || ctx.from?.first_name || '?';
     const chat = ctx.chat?.title || ctx.chat?.type || '?';
-    const text = ctx.message?.text || ctx.message?.web_app_data?.data?.slice(0,40) || ctx.updateType;
+    const text = ctx.message?.text || ctx.updateType;
     console.log(`[bot] ${ctx.updateType} | from:${from} | chat:${chat} | ${text}`);
     return next();
   });
 
-  // 2. /start — private chat only, web_app button is fine here
   bot.start(async (ctx) => {
     const code = ctx.startPayload?.length >= 4 ? ctx.startPayload.toUpperCase() : '';
     const name = ctx.from.first_name || 'Player';
@@ -230,23 +157,20 @@ export function startBot() {
     }
   });
 
-  // 3. /game — works in groups; starts Firebase watcher, sends url button (not web_app)
+  // /game — passes chatId in URL so Mini App can call /api/notify-room
   bot.command('game', async (ctx) => {
     const arg = ctx.message.text.trim().split(/\s+/)[1]?.toLowerCase();
     const gameId = GAME_NAME[arg] ? arg : 'ludo';
     const emoji  = GAME_EMOJI[gameId];
     const name   = GAME_NAME[gameId];
     const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-    const creatorName = ctx.from.first_name || ctx.from.username || 'Player';
-    const creator     = ctx.from.username ? `@${ctx.from.username}` : creatorName;
-    const gameUrl     = `${WEBAPP_URL}?game=${gameId}&from=group`;
+    const creator = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name || 'Player';
 
-    if (isGroup) {
-      // Start watching Firebase for the room this user is about to create
-      watchForRoomReady(bot, ctx.chat.id, creatorName, gameId);
-    }
+    // Pass chatId in URL → Mini App will call /api/notify-room with it after room creation
+    const chatId  = ctx.chat.id;
+    const gameUrl = `${WEBAPP_URL}?game=${gameId}&from=group&chatId=${chatId}`;
 
-    // Groups can't use web_app buttons — use url button instead
+    // Groups require url buttons, private chats can use web_app
     const btn = isGroup
       ? { text: `${emoji} ${name} — Room Banao`, url: gameUrl }
       : { text: `${emoji} ${name} — Room Banao`, web_app: { url: gameUrl } };
@@ -254,12 +178,14 @@ export function startBot() {
     await ctx.reply(
       `${emoji} *${creator} — ${name} room banao!*\n\n` +
       `Button dabao → game khulega → *Create Room* dabao\n` +
-      `Room bante hi group mein join link aa jaayega! 🚀`,
+      `Room bante hi group mein message aa jaayega! 🚀`,
       { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[btn]] } }
     );
   });
 
-  // 4. /help
+  // watchRoom is exposed so /api/notify-room can call it after posting
+  bot._watchRoom = (roomCode, chatId, gameId) => watchRoom(bot, roomCode, chatId, gameId);
+
   bot.command('help', (ctx) => ctx.reply(
     '🎮 *GameSphere Commands*\n\n' +
     '`/game` — Ludo\n`/game chess` — Chess\n`/game carrom` — Carrom\n' +
@@ -267,31 +193,6 @@ export function startBot() {
     '📢 Room bante hi group mein join link aayega!\n🏆 Winner bhi announce hoga!',
     { parse_mode:'Markdown' }
   ));
-
-  // 5. web_app_data — optional fallback if app ever calls Telegram.WebApp.sendData()
-  bot.on('message', async (ctx) => {
-    const data = ctx.message?.web_app_data?.data;
-    if (!data) return;
-    try {
-      const payload = JSON.parse(data);
-      if (payload.type === 'room_created') {
-        const { code, gameId, hostName, maxPlayers } = payload;
-        const chatId  = ctx.chat.id;
-        const emoji   = GAME_EMOJI[gameId] || '🎮';
-        const name    = GAME_NAME[gameId]  || gameId;
-        const url     = `${WEBAPP_URL}?startapp=${code}`;
-        const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
-        watchRoom(bot, code, chatId, gameId);
-        // Use url button (safe for all chat types)
-        await bot.telegram.sendMessage(chatId,
-          `${emoji} *${name} — Room Ready!*\n\n` +
-          `👤 *${creator}* ne room banaya\n🔑 Room Code: \`${code}\`\n👥 Players: 1/${maxPlayers}\n\n` +
-          `👇 *Button dabao — seedha room mein pohoncho!*`,
-          { parse_mode:'Markdown', reply_markup:{ inline_keyboard:[[{ text:`${emoji} ${name} Join Karo!`, url }]] } }
-        );
-      }
-    } catch(e) { console.error('[bot] web_app_data:', e.message); }
-  });
 
   bot.catch((err) => console.error('[bot] error:', err.message));
   console.log('[bot] Bot instance ready (webhook mode)');
