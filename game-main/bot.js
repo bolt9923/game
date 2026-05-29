@@ -214,41 +214,14 @@ export function startBot() {
 
   const bot = new Telegraf(TOKEN);
 
-  // WebApp sendData — jab user app se room banaye
-  bot.on('message', async (ctx) => {
-    if (ctx.message?.web_app_data?.data) {
-      try {
-        const data = JSON.parse(ctx.message.web_app_data.data);
-        if (data.type === 'room_created') {
-          const { code, gameId, hostName, maxPlayers } = data;
-          const chatId = ctx.chat.id;
-          const emoji = GAME_EMOJI[gameId] || '🎮';
-          const name = GAME_NAME[gameId] || gameId;
-          const joinUrl = `${WEBAPP_URL}?startapp=${code}`;
-          const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
-
-          watchRoom(bot, code, chatId, gameId);
-
-          await bot.telegram.sendMessage(chatId,
-            `${emoji} *${name} — Room Ready!*\n\n` +
-            `👤 *${creator}* ne room banaya\n` +
-            `🔑 Room Code: \`${code}\`\n` +
-            `👥 Players: 1/${maxPlayers}\n\n` +
-            `👇 *Button dabao — seedha room mein pohoncho!*`,
-            {
-              parse_mode: 'Markdown',
-              reply_markup: {
-                inline_keyboard: [[
-                  { text: `${emoji} ${name} Join Karo!`, web_app: { url: joinUrl } }
-                ]]
-              }
-            }
-          );
-        }
-      } catch (e) {
-        console.error('[bot] web_app_data error:', e.message);
-      }
-    }
+  // Debug middleware — SABSE PEHLE register karo
+  bot.use(async (ctx, next) => {
+    const type = ctx.updateType;
+    const text = ctx.message?.text || '';
+    const from = ctx.from?.username || ctx.from?.first_name || 'unknown';
+    const chat = ctx.chat?.title || ctx.chat?.type || '';
+    console.log(`[bot] update: ${type} | from:${from} | chat:${chat} | text:${text.slice(0,80)}`);
+    return next();
   });
 
   // /start
@@ -331,6 +304,46 @@ export function startBot() {
       { parse_mode: 'Markdown' }
     )
   );
+
+  // WebApp sendData — jab user app se room banaye
+  bot.on('message', async (ctx) => {
+    if (!ctx.message?.web_app_data?.data) return; // sirf web_app_data handle karo
+    if (ctx.message?.web_app_data?.data) {
+      try {
+        const data = JSON.parse(ctx.message.web_app_data.data);
+        if (data.type === 'room_created') {
+          const { code, gameId, hostName, maxPlayers } = data;
+          const chatId = ctx.chat.id;
+          const emoji = GAME_EMOJI[gameId] || '🎮';
+          const name = GAME_NAME[gameId] || gameId;
+          const joinUrl = `${WEBAPP_URL}?startapp=${code}`;
+          const creator = ctx.from.username ? `@${ctx.from.username}` : hostName;
+
+          watchRoom(bot, code, chatId, gameId);
+
+          await bot.telegram.sendMessage(chatId,
+            `${emoji} *${name} — Room Ready!*\n\n` +
+            `👤 *${creator}* ne room banaya\n` +
+            `🔑 Room Code: \`${code}\`\n` +
+            `👥 Players: 1/${maxPlayers}\n\n` +
+            `👇 *Button dabao — seedha room mein pohoncho!*`,
+            {
+              parse_mode: 'Markdown',
+              reply_markup: {
+                inline_keyboard: [[
+                  { text: `${emoji} ${name} Join Karo!`, web_app: { url: joinUrl } }
+                ]]
+              }
+            }
+          );
+        }
+      } catch (e) {
+        console.error('[bot] web_app_data error:', e.message);
+      }
+    }
+  });
+
+
 
   // Debug — log all incoming updates
   bot.use((ctx, next) => {
