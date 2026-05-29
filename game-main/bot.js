@@ -226,7 +226,7 @@ export function startBot() {
 
   // /start — private chat mein WebApp kholo
   bot.start(async (ctx) => {
-    const roomCode = ctx.startPayload?.length === 6 ? ctx.startPayload.toUpperCase() : '';
+    const roomCode = (ctx.startPayload && ctx.startPayload.length === 6) ? ctx.startPayload.toUpperCase() : '';
     const url = roomCode ? `${WEBAPP_URL}?startapp=${roomCode}` : WEBAPP_URL;
     await ctx.reply(
       `🎮 *GameSphere!*${roomCode ? `\n\n📌 Room: \`${roomCode}\` join karo 👇` : '\n\nGame lobby 👇'}`,
