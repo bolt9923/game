@@ -332,6 +332,16 @@ export function startBot() {
     )
   );
 
+  // Debug — log all incoming updates
+  bot.use((ctx, next) => {
+    const type = ctx.updateType;
+    const text = ctx.message?.text || ctx.message?.web_app_data?.data || '';
+    const from = ctx.from?.username || ctx.from?.first_name || 'unknown';
+    const chat = ctx.chat?.title || ctx.chat?.type || '';
+    console.log(`[bot] update: ${type} | from: ${from} | chat: ${chat} | text: ${text.slice(0,50)}`);
+    return next();
+  });
+
   bot.catch((err) => console.error('[bot] error:', err.message));
   console.log('[bot] Bot instance ready (webhook mode)');
   return bot;
