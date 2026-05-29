@@ -34,11 +34,12 @@ const TURN_TIME = 25;
 const MAX_CONSEC_FOULS = 3;
 
 const POINTS_COIN   = 10;
-const POINTS_WHITE  = POINTS_COIN;
-const POINTS_BLACK  = POINTS_COIN;
 const POINTS_QUEEN  = 50;
-const POINTS_QUEEN_COVER_BONUS = 2; // Extra points for covering queen same turn
+const POINTS_QUEEN_COVER_BONUS = 2;
 
+// 2-Player: p1 = bottom (white coins), p2 = top (black coins)
+// Standard carrom: player sitting at bottom plays white, top plays black
+// 4-Player: p1(bottom)+p3(left) = Team A (white), p2(top)+p4(right) = Team B (black)
 const STRIKER_Y_2P: Record<string, number> = {
   p1: BH - BOARD_PAD - 32,
   p2: BOARD_PAD + 32,
@@ -50,9 +51,19 @@ const STRIKER_CONFIG_4P: Record<string, { x: number; y: number; axis: 'h' | 'v' 
   p4: { x: BW - BOARD_PAD - 32, y: BH / 2, axis: 'v' },
 };
 
-const PLAYER_COIN_LABEL: Record<string, string> = {
-  p1: 'black', p2: 'white', p3: 'black', p4: 'white',
-};
+// 2P: p1=white, p2=black
+// 4P: p1,p3=white (team), p2,p4=black (team)
+function getPlayerCoinColor(player: Player, numPlayers: number): 'white' | 'black' {
+  if (numPlayers === 4) {
+    return (player === 'p1' || player === 'p3') ? 'white' : 'black';
+  }
+  return player === 'p1' ? 'white' : 'black';
+}
+
+function getTeamPlayers(player: Player, numPlayers: number): Player[] {
+  if (numPlayers !== 4) return [player];
+  return (player === 'p1' || player === 'p3') ? ['p1', 'p3'] : ['p2', 'p4'];
+}
 
 const COLORS = {
   board:   '#c8961c',
@@ -76,7 +87,7 @@ const PLAYER_NAMES_DEFAULT: Record<string, string> = {
 };
 
 // ─────────────────────────────────────────────
-//  ONLINE LOBBY COMPONENT (Firebase-backed, 2P & 4P)
+//  ONLINE LOBBY COMPONENT
 // ─────────────────────────────────────────────
 import { rooms as firebaseRooms, type RoomPlayer as FbRoomPlayer } from '../lib/rooms';
 import { db as gameDb } from '../lib/db';
@@ -87,7 +98,7 @@ interface LobbyProps {
 }
 
 function CarromOnlineLobby({ onStartGame, onBack }: LobbyProps) {
-  const [step, setStep] = useState<'menu' | 'select_size' | 'create' | 'join_form' | 'waiting'>( 'menu');
+  const [step, setStep] = useState<'menu' | 'select_size' | 'create' | 'join_form' | 'waiting'>('menu');
   const [roomCode, setRoomCode] = useState('');
   const [joinInput, setJoinInput] = useState('');
   const [error, setError] = useState('');
@@ -211,7 +222,6 @@ function CarromOnlineLobby({ onStartGame, onBack }: LobbyProps) {
     </div>
   );
 
-  // Waiting room
   const isHost = myRole === 'p1';
   const filled = players.length;
   const ready = filled >= Math.min(numPlayers, 2);
@@ -298,29 +308,33 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   const pocketedSet   = useRef<Set<number>>(new Set());
 
   // ── Game State Refs ────────────────────────
-  const turnRef            = useRef<Player>('p1');
-  const canShootRef        = useRef(true);
-  const isMovingRef        = useRef(false);
-  const extraTurnRef       = useRef(false);
-  const queenPocketed      = useRef(false);
-  const queenCovered       = useRef(false);
-  const queenOwner         = useRef<Player | null>(null);
-  const modeRef            = useRef<Mode>('menu');
-  const roleRef            = useRef<Player | null>(null);
-  const roomIdRef          = useRef('');
-  const scoresRef          = useRef<GameScores>({ p1: 0, p2: 0, p3: 0, p4: 0 });
-  const coinsLeftRef       = useRef<CoinsLeft>({ p1: 9, p2: 9, p3: 0, p4: 0 });
-  const disqualifiedRef    = useRef<Set<Player>>(new Set());
-  const consecutiveFoulsRef = useRef<Record<Player, number>>({ p1: 0, p2: 0, p3: 0, p4: 0 });
-  const numPlayersRef      = useRef(2);
-
-  // Track if striker went to side border (border foul) — DISABLED: real carrom = no foul on wall hit
-  const strikerBorderFoulRef = useRef(false);
-  // Track whether current shot pocketed own coin (for queen cover detection)
-  const shotPocketedOwnCoin  = useRef(false);
-  // Real carrom: after pocketing queen, the SAME player gets one more shot to cover it.
-  // 1 = next shot is the cover-grace shot; 0 = grace consumed → if still uncovered, queen returns.
+  const turnRef              = useRef<Player>('p1');
+  const canShootRef          = useRef(true);
+  const isMovingRef          = useRef(false);
+  // extraTurnRef: true = current player gets another turn
+  const extraTurnRef         = useRef(false);
+  // foulThisTurnRef: if ANY foul happened this turn, extra turn is cancelled and turn passes
+  const foulThisTurnRef      = useRef(false);
+  const queenPocketed        = useRef(false);
+  const queenCovered         = useRef(false);
+  const queenOwner           = useRef<Player | null>(null);
+  // queenCoverGraceRef: 1 = queen pocketed this shot (cover can happen same shot or next shot)
+  //                     0 = grace used, if not covered → queen returns
   const queenCoverGraceRef   = useRef(0);
+  const modeRef              = useRef<Mode>('menu');
+  const roleRef              = useRef<Player | null>(null);
+  const roomIdRef            = useRef('');
+  const scoresRef            = useRef<GameScores>({ p1: 0, p2: 0, p3: 0, p4: 0 });
+  const coinsLeftRef         = useRef<CoinsLeft>({ p1: 9, p2: 9, p3: 0, p4: 0 });
+  const disqualifiedRef      = useRef<Set<Player>>(new Set());
+  const consecutiveFoulsRef  = useRef<Record<Player, number>>({ p1: 0, p2: 0, p3: 0, p4: 0 });
+  const numPlayersRef        = useRef(2);
+  // strikerPocketed this turn?
+  const strikerFoulRef       = useRef(false);
+  // opponent coin pocketed this turn?
+  const oppCoinFoulRef       = useRef(false);
+  // Did we pocket any own coin this turn?
+  const ownCoinPocketedRef   = useRef(false);
 
   const strikerSlideRef = useRef(0.5);
   const isDraggingRef  = useRef(false);
@@ -372,13 +386,12 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
         osc.start(now); osc.stop(now + 0.42);
       } else if (type === 'border') {
-        // Thud sound for border hit foul
         osc.type = 'square';
-        osc.frequency.setValueAtTime(150, now);
-        osc.frequency.exponentialRampToValueAtTime(60, now + 0.25);
-        gain.gain.setValueAtTime(0.45, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-        osc.start(now); osc.stop(now + 0.32);
+        osc.frequency.setValueAtTime(200, now);
+        osc.frequency.exponentialRampToValueAtTime(80, now + 0.2);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
+        osc.start(now); osc.stop(now + 0.28);
       } else if (type === 'foul') {
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(200, now);
@@ -421,8 +434,13 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     return all.filter(p => !disqualifiedRef.current.has(p));
   }
 
+  // 4P: clockwise order p1→p2→p3→p4→p1 (but p1&p3 opposite, p2&p4 opposite)
+  // Actual clockwise seating: bottom=p1, right=p4, top=p2, left=p3
   function getNextPlayer(cur: Player): Player {
-    const active = getActivePlayers();
+    const clockwise: Player[] = numPlayersRef.current === 4
+      ? ['p1', 'p4', 'p2', 'p3']  // clockwise: bottom→right→top→left
+      : ['p1', 'p2'];
+    const active = clockwise.filter(p => !disqualifiedRef.current.has(p));
     if (active.length === 0) return cur;
     const idx = active.indexOf(cur);
     return active[(idx + 1) % active.length];
@@ -450,25 +468,6 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         return { x: cfg.x, y: minY + (maxY - minY) * slide };
       }
     }
-  }
-
-  function getPlayerCoinLabel(player: Player): string {
-    if (numPlayersRef.current === 4) return PLAYER_COIN_LABEL[player];
-    return player === 'p1' ? 'white' : 'black';
-  }
-
-  function getOppCoinLabel(player: Player): string {
-    const mine = getPlayerCoinLabel(player);
-    if (mine === 'white') return 'black';
-    return 'white';
-  }
-
-  // ─────────────────────────────────────────
-  //  Check if striker is near border (side foul detection)
-  // ─────────────────────────────────────────
-  function isNearBorder(x: number, y: number): boolean {
-    const margin = BOARD_PAD + STRIKER_R + 2;
-    return (x < margin || x > BW - margin || y < margin || y > BH - margin);
   }
 
   // ─────────────────────────────────────────
@@ -596,7 +595,6 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         continue;
       }
 
-      // Coins
       ctx.save();
       let fillGrad: CanvasGradient;
       let outlineCol: string, innerCol: string;
@@ -627,7 +625,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
       ctx.restore();
     }
 
-    // Queen status indicator
+    // Queen cover reminder
     if (queenPocketed.current && !queenCovered.current) {
       ctx.save();
       ctx.globalAlpha = 0.9;
@@ -635,7 +633,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
       ctx.textAlign = 'center';
       ctx.fillStyle = '#fbbf24';
       ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
-      ctx.fillText('Cover Queen!', W/2, bp + 22*s);
+      ctx.fillText('Queen Cover Karo!', W/2, bp + 22*s);
       ctx.restore();
     }
   }
@@ -738,8 +736,9 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     }
     pocketedSet.current.clear();
     coinBodiesRef.current = [];
-    strikerBorderFoulRef.current = false;
-    shotPocketedOwnCoin.current = false;
+    strikerFoulRef.current = false;
+    oppCoinFoulRef.current = false;
+    ownCoinPocketedRef.current = false;
 
     const engine = Matter.Engine.create({ gravity: { x: 0, y: 0 } });
     const runner = Matter.Runner.create();
@@ -767,13 +766,14 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
       Matter.Bodies.circle(c.x, c.y, POCKET_R, { isStatic: true, isSensor: true, label: 'pocket' })
     );
 
-    // Coins
+    // Coins — standard carrom setup: queen center, 6 inner ring alternating, 12 outer ring alternating
     const coinOpts = (label: string) => ({
       restitution: 0.72, friction: 0.04, frictionAir: 0.016, density: 0.002, label,
     });
     const cx = BW/2, cy = BH/2;
     const coins: Matter.Body[] = [];
     coins.push(Matter.Bodies.circle(cx, cy, COIN_R, coinOpts('queen')));
+    // Inner ring: 6 coins alternating white/black
     for (let i = 0; i < 6; i++) {
       const a = (i/6) * Math.PI * 2;
       coins.push(Matter.Bodies.circle(
@@ -781,6 +781,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         COIN_R, coinOpts(i%2===0 ? 'white' : 'black')
       ));
     }
+    // Outer ring: 12 coins alternating black/white
     for (let i = 0; i < 12; i++) {
       const a = (i/12)*Math.PI*2 + Math.PI/12;
       coins.push(Matter.Bodies.circle(
@@ -803,13 +804,11 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     Matter.Events.on(engine, 'collisionStart', (evt: Matter.IEventCollision<Matter.Engine>) => {
       for (const pair of evt.pairs) {
         const { bodyA, bodyB } = pair;
-
-        // Wall collision for striker → NOT a foul in real carrom, just a bounce + thud sound
+        // Wall bounce sound
         if ((bodyA.label === 'wall' && bodyB.label === 'striker') ||
             (bodyB.label === 'wall' && bodyA.label === 'striker')) {
           playSound('border');
         }
-
         const pocket = bodyA.label === 'pocket' ? bodyA : bodyB.label === 'pocket' ? bodyB : null;
         const coin   = pocket === bodyA ? bodyB : pocket === bodyB ? bodyA : null;
         if (pocket && coin) handlePocket(coin);
@@ -850,6 +849,16 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
 
   // ─────────────────────────────────────────
   //  POCKET HANDLING
+  //  KEY RULES:
+  //  1. Striker pocketed → FOUL (striker foul), penalty coin returns, turn passes
+  //  2. Own coin pocketed → extra turn, points scored
+  //  3. Opponent coin pocketed → FOUL, they get the points, turn passes
+  //  4. Queen pocketed → must cover same shot or next shot
+  //     - If covered same shot (own coin also pocketed this shot) → queen covered, extra turn
+  //     - If not covered same shot → get one more shot to cover
+  //     - If cover shot fails → queen returns to center
+  //  5. Moving coins ke time second shot = NOT applicable here (single striker model)
+  //  6. Bina coin touch kiye (air shot) = foul → handled in afterShot
   // ─────────────────────────────────────────
   function handlePocket(body: Matter.Body) {
     if (pocketedSet.current.has(body.id)) return;
@@ -862,55 +871,64 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
 
     const label = body.label;
     const cur   = turnRef.current;
+    const numP  = numPlayersRef.current;
 
+    // ── STRIKER POCKETED → Foul ──
     if (label === 'striker') {
-      showFoul('⚠️ FOUL — Striker pocketed! Your coin returns to center.');
+      strikerFoulRef.current = true;
+      foulThisTurnRef.current = true;
+      extraTurnRef.current = false; // foul cancels extra turn
       playSound('foul');
-      setTimeout(() => returnCoinToBoard(getPlayerCoinLabel(cur)), 400);
-      setTimeout(() => endTurn(true, true), 500);
+      showFoul('⚠️ FOUL — Striker pocket hua! Ek coin wapas aayega.');
+      // Penalty: one previously pocketed own coin returns
+      setTimeout(() => returnCoinToBoard(getPlayerCoinColor(cur, numP)), 400);
+      setTimeout(() => Matter.Composite.remove(engineRef.current!.world, body), 80);
       return;
     }
 
-    const myLabel  = getPlayerCoinLabel(cur);
-    const oppLabel = getOppCoinLabel(cur);
+    const myColor  = getPlayerCoinColor(cur, numP);
 
+    // ── QUEEN POCKETED ──
     if (label === 'queen') {
+      // ANY player can pocket queen
       queenPocketed.current = true;
       queenCovered.current  = false;
       queenOwner.current    = cur;
-      // Real carrom: pocketing the queen gives the player one more chance to cover it.
-      // The cover can happen on the SAME shot (if own coin also pocketed) or on the NEXT shot.
-      queenCoverGraceRef.current = 1;
-      extraTurnRef.current = true;
+      queenCoverGraceRef.current = 1; // will get one more shot to cover if not same shot
+      // Don't set extraTurn yet — we need to see if own coin is also pocketed this shot
+      // extraTurn will be set in afterShot if queen was pocketed
       setQueenStatus('pocketed');
-      setQueenMsg('👑 Queen pocketed! You have one shot to cover it.');
+      setQueenMsg('👑 Queen pocket hua! Usi shot ya agli shot mein apna coin pocket karo.');
       setTimeout(() => setQueenMsg(''), 3500);
       setTimeout(() => Matter.Composite.remove(engineRef.current!.world, body), 80);
       return;
     }
 
-    if (label === myLabel) {
-      extraTurnRef.current = true;
+    // ── OWN COIN POCKETED ──
+    if (label === myColor) {
+      ownCoinPocketedRef.current = true;
       const pts = POINTS_COIN;
+
+      // Check if this covers the queen
+      let queenCoverBonus = 0;
+      if (queenPocketed.current && !queenCovered.current && queenOwner.current === cur) {
+        queenCovered.current = true;
+        queenCoverGraceRef.current = 0;
+        queenCoverBonus = POINTS_QUEEN + POINTS_QUEEN_COVER_BONUS;
+        setQueenStatus('covered');
+        setQueenMsg(`👑 Queen cover! +${POINTS_QUEEN} + ${POINTS_QUEEN_COVER_BONUS} bonus pts!`);
+        setTimeout(() => setQueenMsg(''), 3000);
+      }
 
       setScores(prev => {
         const next = { ...prev };
-        next[cur] += pts;
-        // Queen cover: same shot OR the granted next shot
-        if (queenPocketed.current && !queenCovered.current && queenOwner.current === cur) {
-          queenCovered.current = true;
-          queenCoverGraceRef.current = 0;
-          shotPocketedOwnCoin.current = true;
-          // +50 queen pts + 2 bonus for covering
-          next[cur] += POINTS_QUEEN + POINTS_QUEEN_COVER_BONUS;
-          setQueenStatus('covered');
-          setQueenMsg(`👑 Queen covered! +${POINTS_QUEEN} + ${POINTS_QUEEN_COVER_BONUS} bonus pts!`);
-          setTimeout(() => setQueenMsg(''), 3000);
-        }
+        next[cur] += pts + queenCoverBonus;
         scoresRef.current = next;
         return next;
       });
 
+      // In 4P mode, update team coin count: coins are shared between teammates
+      // We track per-player coin count, but winning condition checks the team
       setCoinsLeft(prev => {
         const next = { ...prev };
         next[cur] = Math.max(0, next[cur] - 1);
@@ -918,18 +936,29 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         return next;
       });
 
+      // Own coin pocketed → extra turn (unless foul also happened)
+      if (!foulThisTurnRef.current) {
+        extraTurnRef.current = true;
+      }
       resetConsecutiveFouls(cur);
       setExtraTurnMsg(true);
       setTimeout(() => setExtraTurnMsg(false), 1200);
-    } else if (label === oppLabel) {
-      const numP = numPlayersRef.current;
-      let coinOwner: Player = 'p2';
-      if (numP === 2) {
-        coinOwner = label === getPlayerCoinLabel('p1') ? 'p1' : 'p2';
-      } else {
-        const owners: Player[] = ['p1','p2','p3','p4'];
-        coinOwner = owners.find(p => getPlayerCoinLabel(p) === label) ?? 'p2';
+
+    } else {
+      // ── OPPONENT COIN POCKETED → FOUL ──
+      // Foul rule: pocketing opponent's coin = foul, turn passes
+      // But opponent gets the points for their coin
+      oppCoinFoulRef.current = true;
+      foulThisTurnRef.current = true;
+      extraTurnRef.current = false; // cancel extra turn
+
+      // Determine which player owns this coin
+      let coinOwner: Player = cur === 'p1' ? 'p2' : 'p1';
+      if (numP === 4) {
+        const allPlayers: Player[] = ['p1', 'p2', 'p3', 'p4'];
+        coinOwner = allPlayers.find(p => getPlayerCoinColor(p, numP) === label) ?? coinOwner;
       }
+
       const pts = POINTS_COIN;
       setScores(prev => {
         const next = { ...prev };
@@ -943,7 +972,9 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         coinsLeftRef.current = next;
         return next;
       });
-      showFoul(`✅ ${label === 'white' ? '⚪' : '⚫'} Opponent coin → +${pts} pts for them!`);
+
+      playSound('foul');
+      showFoul(`⚠️ FOUL — ${label === 'white' ? '⚪' : '⚫'} Opponent ka coin pocket hua! Turn jaata hai.`);
     }
 
     setTimeout(() => Matter.Composite.remove(engineRef.current!.world, body), 80);
@@ -987,23 +1018,25 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   }
 
   // ─────────────────────────────────────────
-  //  TURN FLOW
+  //  AFTER SHOT — resolve queen grace, check fouls, decide turn
   // ─────────────────────────────────────────
   function afterShot() {
     const cur = turnRef.current;
 
-    // NOTE: Hitting the side border is NOT a foul in real carrom — removed border-foul logic.
-    strikerBorderFoulRef.current = false;
-
-    // Queen not covered → give one grace shot first, then return queen to center.
-    if (queenPocketed.current && !queenCovered.current) {
+    // Queen cover logic
+    if (queenPocketed.current && !queenCovered.current && !strikerFoulRef.current) {
       if (queenCoverGraceRef.current > 0) {
-        // This shot was the queen-pocket shot itself. Consume the grace — next shot is the cover chance.
+        // Queen was pocketed this shot but NOT covered same shot
+        // → consume grace: player gets one more shot to cover
         queenCoverGraceRef.current = 0;
-        setQueenMsg('👑 Cover the queen on your next shot!');
-        setTimeout(() => setQueenMsg(''), 2500);
+        // Give extra turn to cover (unless foul happened)
+        if (!foulThisTurnRef.current) {
+          extraTurnRef.current = true;
+          setQueenMsg('👑 Queen cover karne ka mauka! Apna coin pocket karo.');
+          setTimeout(() => setQueenMsg(''), 2500);
+        }
       } else {
-        // Cover-grace shot is over and queen was NOT covered → queen returns to center.
+        // Cover grace expired — queen returns to center
         const stillOnBoard = coinBodiesRef.current.find(
           b => b.label === 'queen' && !pocketedSet.current.has(b.id)
         );
@@ -1016,28 +1049,44 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         }
         queenPocketed.current = false;
         queenOwner.current    = null;
+        extraTurnRef.current  = false;
         setQueenStatus('on_board');
-        setQueenMsg('👑 Queen not covered — back to center!');
+        setQueenMsg('👑 Queen cover nahin hua — center mein wapas!');
         setTimeout(() => setQueenMsg(''), 3000);
       }
     }
 
-    shotPocketedOwnCoin.current = false;
+    // Reset per-shot flags
+    strikerFoulRef.current = false;
+    oppCoinFoulRef.current = false;
+    ownCoinPocketedRef.current = false;
+
     checkWin();
-    endTurn(false, false);
+    endTurn(foulThisTurnRef.current);
+    foulThisTurnRef.current = false;
   }
 
-  function endTurn(foul: boolean, strikerFoul: boolean) {
+  // ─────────────────────────────────────────
+  //  END TURN
+  //  Rules:
+  //  - If foul happened → add consecutive foul, extra turn cancelled, turn passes
+  //  - If own coin pocketed (no foul) → extra turn (same player again)
+  //  - Otherwise → turn passes to next player (clockwise in 4P)
+  // ─────────────────────────────────────────
+  function endTurn(wasFoul: boolean) {
     clearTimer();
 
-    if (foul || strikerFoul) {
+    if (wasFoul) {
       addConsecutiveFoul(turnRef.current);
+      extraTurnRef.current = false;
     }
 
-    if (!extraTurnRef.current || foul || strikerFoul) {
+    if (!extraTurnRef.current) {
+      // Pass turn to next player
       const next = getNextPlayer(turnRef.current);
       if (!disqualifiedRef.current.has(next)) {
-        setTurn(next); turnRef.current = next;
+        setTurn(next);
+        turnRef.current = next;
       }
     }
     extraTurnRef.current = false;
@@ -1073,22 +1122,31 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     Matter.Body.setAngularVelocity(strikerRef.current, 0);
     isDraggingRef.current  = false;
     dragCurrentRef.current = null;
-    strikerBorderFoulRef.current = false;
     pocketedSet.current.delete(strikerRef.current.id);
   }
 
   function checkWin() {
     const active = getActivePlayers();
+    const numP = numPlayersRef.current;
+
     for (const p of active) {
-      const cl = coinsLeftRef.current;
-      const sc = scoresRef.current;
-      if (cl[p] <= 0 && queenCovered.current) {
-        triggerWin(p); return;
+      if (numP === 4) {
+        // Team win: sum of team coins
+        const team = getTeamPlayers(p, numP);
+        const teamCoins = team.reduce((sum, t) => sum + coinsLeftRef.current[t], 0);
+        if (teamCoins <= 0 && queenCovered.current) {
+          triggerWin(p); return;
+        }
+      } else {
+        if (coinsLeftRef.current[p] <= 0 && queenCovered.current) {
+          triggerWin(p); return;
+        }
       }
-      if (sc[p] >= 200) {
+      if (scoresRef.current[p] >= 200) {
         triggerWin(p); return;
       }
     }
+
     const allCoins = coinBodiesRef.current.filter(b => !pocketedSet.current.has(b.id));
     const nonQueenCoins = allCoins.filter(b => b.label !== 'queen');
     if (nonQueenCoins.length === 0 && queenCovered.current) {
@@ -1120,9 +1178,12 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
       if (timerValRef.current <= 5) playSound('tick');
       if (timerValRef.current <= 0) {
         clearTimer();
-        showFoul('⏱️ Time out! Your coin returns to center.');
-        returnCoinToBoard(getPlayerCoinLabel(turnRef.current));
-        endTurn(true, false);
+        // Time out = foul: return one previously pocketed coin
+        showFoul('⏱️ Time out! FOUL — ek coin wapas aayega.');
+        returnCoinToBoard(getPlayerCoinColor(turnRef.current, numPlayersRef.current));
+        foulThisTurnRef.current = true;
+        endTurn(true);
+        foulThisTurnRef.current = false;
       }
     }, 1000);
   }
@@ -1135,7 +1196,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   //  AI
   // ─────────────────────────────────────────
   function scheduleAI() {
-    setStatusMsg('🤖 AI is thinking…');
+    setStatusMsg('🤖 AI soch raha hai…');
     setTimeout(runAI, 900 + Math.random() * 700);
   }
 
@@ -1147,9 +1208,9 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
 
     const sx = strikerRef.current.position.x;
     const sy = strikerRef.current.position.y;
-    const myLabel = getPlayerCoinLabel('p2');
+    const myColor = getPlayerCoinColor('p2', numPlayersRef.current);
     const targets = coinBodiesRef.current.filter(
-      b => !pocketedSet.current.has(b.id) && (b.label === myLabel || b.label === 'queen')
+      b => !pocketedSet.current.has(b.id) && (b.label === myColor || b.label === 'queen')
     );
 
     let targetX = BW/2, targetY = BH/2;
@@ -1183,8 +1244,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     if (mode !== 'online_playing' || !roomId) return;
     const unsub = mockBackend.subscribe(('carrom_sync_' + roomId) as any, (data: any) => {
       if (data.type === 'strike') {
-        // Only apply incoming strike if it was sent by the opponent (not ourselves)
-        if (data.shooter && data.shooter === roleRef.current) return; // ignore our own echo
+        if (data.shooter && data.shooter === roleRef.current) return;
         if (turnRef.current !== roleRef.current && strikerRef.current && canShootRef.current) {
           canShootRef.current = false; isMovingRef.current = true;
           Matter.Body.setPosition(strikerRef.current, data.position);
@@ -1224,10 +1284,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   function onPointerDown(e: React.PointerEvent) {
     if (!canShootRef.current || isMovingRef.current) return;
     if (modeRef.current === 'bot' && turnRef.current === 'p2') return;
-    if (modeRef.current === 'online_playing' && roleRef.current !== turnRef.current) {
-      console.log('[Carrom] Not your turn:', roleRef.current, '!==', turnRef.current);
-      return;
-    }
+    if (modeRef.current === 'online_playing' && roleRef.current !== turnRef.current) return;
     if (disqualifiedRef.current.has(turnRef.current)) return;
     if (!strikerRef.current) return;
 
@@ -1235,6 +1292,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     const sx  = strikerRef.current.position.x;
     const sy  = strikerRef.current.position.y;
 
+    // Lane positioning — tap on the lane to slide striker
     if (Math.hypot(pos.x - sx, pos.y - sy) > STRIKER_R * 4.5) {
       const cur = turnRef.current;
       const numP = numPlayersRef.current;
@@ -1280,7 +1338,6 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
 
   function onPointerMove(e: React.PointerEvent) {
     const pos = getPhysicsPos(e);
-
     if (isDraggingRef.current && strikerRef.current) {
       const sx = strikerRef.current.position.x;
       const sy = strikerRef.current.position.y;
@@ -1318,7 +1375,11 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
 
     canShootRef.current = false;
     isMovingRef.current = true;
-    strikerBorderFoulRef.current = false; // reset before each shot
+    // Reset per-shot foul tracking
+    foulThisTurnRef.current = false;
+    strikerFoulRef.current = false;
+    oppCoinFoulRef.current = false;
+    ownCoinPocketedRef.current = false;
 
     Matter.Body.applyForce(strikerRef.current, strikerRef.current.position, { x: fx, y: fy });
     playSound('shoot', powerVal);
@@ -1359,8 +1420,8 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   function updateStatusMsg() {
     const cur = turnRef.current;
     const curMode = modeRef.current;
-    if (curMode === 'bot' && cur === 'p2') setStatusMsg('🤖 AI is aiming…');
-    else setStatusMsg('Tap lane to position · Drag striker to aim & shoot!');
+    if (curMode === 'bot' && cur === 'p2') setStatusMsg('🤖 AI aim kar raha hai…');
+    else setStatusMsg('Lane tap karo position ke liye · Drag karo aim & shoot!');
   }
 
   // ─────────────────────────────────────────
@@ -1403,6 +1464,8 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   // ─────────────────────────────────────────
   function startGame(gameMode: Mode, numPlayers = 2) {
     numPlayersRef.current = numPlayers;
+    // In 4P: each player has 9 coins initially, but they alternate colors per team
+    // For simplicity tracking: each player tracks their own color coins (9 each in 4P)
     const initCoins: CoinsLeft = numPlayers === 4
       ? { p1: 9, p2: 9, p3: 9, p4: 9 }
       : { p1: 9, p2: 9, p3: 0, p4: 0 };
@@ -1425,14 +1488,17 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     canShootRef.current   = true;
     isMovingRef.current   = false;
     extraTurnRef.current  = false;
+    foulThisTurnRef.current = false;
     queenPocketed.current = false;
     queenCovered.current  = false;
     queenOwner.current    = null;
+    queenCoverGraceRef.current = 0;
     isDraggingRef.current = false;
     dragCurrentRef.current = null;
     strikerSlideRef.current = 0.5;
-    strikerBorderFoulRef.current = false;
-    shotPocketedOwnCoin.current = false;
+    strikerFoulRef.current = false;
+    oppCoinFoulRef.current = false;
+    ownCoinPocketedRef.current = false;
   }
 
   // Canvas setup after mode change
@@ -1481,14 +1547,12 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   }
 
   // ─────────────────────────────────────────
-  //  RENDER — ONLINE LOBBY
+  //  RENDER — Auto-launch from RoomHub
   // ─────────────────────────────────────────
-  // Auto-launch from RoomHub (mpSession already set)
   if (mode === 'menu' && mpSession.forGame('carrom')) {
     const sess = mpSession.forGame('carrom')!;
     const r = sess.role as Player;
     const np = sess.maxPlayers as 2 | 4;
-    // Use setTimeout to avoid React state-during-render
     setTimeout(() => {
       setRole(r); roleRef.current = r;
       setRoomId(sess.roomId); roomIdRef.current = sess.roomId;
@@ -1536,7 +1600,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
           <h1 className="text-4xl font-black tracking-tight bg-gradient-to-r from-amber-400 to-red-500 bg-clip-text text-transparent">
             CARROM POOL
           </h1>
-          <p className="text-gray-500 text-sm mt-1 tracking-widest uppercase">Realistic Rules</p>
+          <p className="text-gray-500 text-sm mt-1 tracking-widest uppercase">Real Rules</p>
         </div>
 
         {/* Points legend */}
@@ -1568,14 +1632,14 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
             className="group w-full py-4 px-5 rounded-2xl bg-gradient-to-r from-blue-600 to-blue-500 text-white font-bold shadow-[0_4px_20px_rgba(59,130,246,0.4)] active:scale-[0.97] transition-all flex items-center gap-3">
             <Users className="w-5 h-5" />
             <span className="flex-1 text-left">2 Player Local</span>
-            <span className="text-xs opacity-70 font-normal">Same device</span>
+            <span className="text-xs opacity-70 font-normal">Opposite sides</span>
           </button>
 
           <button onClick={() => startGame('local4', 4)}
             className="group w-full py-4 px-5 rounded-2xl bg-gradient-to-r from-purple-600 to-pink-500 text-white font-bold shadow-[0_4px_20px_rgba(168,85,247,0.4)] active:scale-[0.97] transition-all flex items-center gap-3">
             <User className="w-5 h-5" />
             <span className="flex-1 text-left">4 Player Local</span>
-            <span className="text-xs opacity-70 font-normal">All sides</span>
+            <span className="text-xs opacity-70 font-normal">Clockwise teams</span>
           </button>
 
           <button onClick={() => setMode('online_lobby')}
@@ -1586,10 +1650,11 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
           </button>
         </div>
 
-        {/* Rules */}
+        {/* Rules hint */}
         <div className="mt-6 text-[11px] text-gray-600 text-center max-w-xs leading-relaxed">
-          Side border hit = foul! Tap lane to slide striker · Drag to aim<br/>
-          3 fouls = disqualified · Queen cover same turn = +{POINTS_QUEEN}+{POINTS_QUEEN_COVER_BONUS} pts
+          2P: Opposite side baithenge · Toss se first turn decide<br/>
+          Apna coin pocket → extra turn · Opponent ka coin → FOUL<br/>
+          Queen cover same/next shot · 3 fouls = disqualified
         </div>
       </div>
     );
@@ -1618,7 +1683,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
             : 'text-white'
           }`}
           style={{ background: extraTurnMsg ? undefined : PLAYER_COLORS[turn] + 'dd' }}>
-          {extraTurnMsg ? '🎯 Extra Turn!' : `${getPlayerName(turn)}'s Turn`}
+          {extraTurnMsg ? '🎯 Extra Turn!' : `${getPlayerName(turn)} ki Baari`}
         </div>
 
         {/* Timer */}
@@ -1652,7 +1717,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
                     <span className="text-red-400 ml-1">{Array(consecutiveFouls[p]).fill('⚠️').join('')}</span>}
                 </div>
                 <div className="text-[9px] text-gray-500">
-                  {p==='p1'?'⚪ White':'⚫ Black'} · {coinsLeft[p]} left
+                  {p==='p1'?'⚪ White':'⚫ Black'} · {coinsLeft[p]} baaki
                 </div>
               </div>
               <div className="text-2xl font-black text-white">{scores[p]}</div>
@@ -1661,22 +1726,26 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-1.5 w-full max-w-[440px] px-3 pb-2">
-          {(['p1','p2','p3','p4'] as Player[]).map(p => (
-            <div key={p} className={`flex items-center justify-between px-2.5 py-1.5 rounded-xl border transition-all ${
-              turn===p ? 'border-opacity-60' : 'border-gray-700/40 bg-gray-800/30'
-            } ${disqualified.has(p) ? 'opacity-40 line-through' : ''}`}
-              style={turn===p ? {borderColor: PLAYER_COLORS[p]+'99', background: PLAYER_COLORS[p]+'15'} : {}}>
-              <div>
-                <div className="text-[9px] font-bold uppercase" style={{ color: PLAYER_COLORS[p] }}>
-                  {getPlayerName(p)}
-                  {consecutiveFouls[p] > 0 && !disqualified.has(p) &&
-                    <span className="text-red-400 ml-0.5">{Array(consecutiveFouls[p]).fill('⚠').join('')}</span>}
+          {(['p1','p2','p3','p4'] as Player[]).map(p => {
+            const coinColor = getPlayerCoinColor(p, 4);
+            const teamLabel = (p === 'p1' || p === 'p3') ? 'Team A' : 'Team B';
+            return (
+              <div key={p} className={`flex items-center justify-between px-2.5 py-1.5 rounded-xl border transition-all ${
+                turn===p ? 'border-opacity-60' : 'border-gray-700/40 bg-gray-800/30'
+              } ${disqualified.has(p) ? 'opacity-40' : ''}`}
+                style={turn===p ? {borderColor: PLAYER_COLORS[p]+'99', background: PLAYER_COLORS[p]+'15'} : {}}>
+                <div>
+                  <div className="text-[9px] font-bold uppercase" style={{ color: PLAYER_COLORS[p] }}>
+                    {getPlayerName(p)} <span className="opacity-60">({teamLabel})</span>
+                    {consecutiveFouls[p] > 0 && !disqualified.has(p) &&
+                      <span className="text-red-400 ml-0.5">{Array(consecutiveFouls[p]).fill('⚠').join('')}</span>}
+                  </div>
+                  <div className="text-[8px] text-gray-500">{coinColor === 'white' ? '⚪' : '⚫'} {coinsLeft[p]} baaki</div>
                 </div>
-                <div className="text-[8px] text-gray-500">{coinsLeft[p]} coins</div>
+                <div className="text-lg font-black text-white">{scores[p]}</div>
               </div>
-              <div className="text-lg font-black text-white">{scores[p]}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -1754,7 +1823,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
           <Crown className="w-20 h-20 text-yellow-400 mb-3 drop-shadow-[0_0_20px_rgba(250,204,21,0.8)] animate-bounce" />
           <Trophy className="w-8 h-8 text-amber-500 mb-2" />
           <h2 className="text-4xl font-black bg-gradient-to-r from-amber-400 to-red-500 bg-clip-text text-transparent mb-1">
-            {getPlayerName(winner)} Wins!
+            {getPlayerName(winner)} Jeeta!
           </h2>
           <p className="text-gray-400 text-base mb-3">
             Score: <span className="text-white font-bold">{scores[winner]}</span> pts
@@ -1774,7 +1843,7 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
           <div className="flex gap-3">
             <button onClick={() => { stopGameLoop(); clearTimer(); startGame(mode, numP); }}
               className="py-3 px-7 bg-gradient-to-r from-amber-500 to-orange-500 text-white font-bold rounded-2xl shadow-lg active:scale-95 transition-transform">
-              Play Again
+              Dobara Khelo
             </button>
             <button onClick={() => { stopGameLoop(); clearTimer(); onGameOver(scores[winner], 'Win'); }}
               className="py-3 px-7 bg-gray-800 border border-gray-700 text-white font-bold rounded-2xl active:scale-95 transition-transform">
