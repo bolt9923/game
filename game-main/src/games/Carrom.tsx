@@ -838,13 +838,32 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
   // ─────────────────────────────────────────
   function returnCoinToBoard(label: string) {
     if (!engineRef.current) return;
+
+    // Safety check: don't return if no coin of this type is pocketed
+    const pocketedOfType = coinBodiesRef.current.filter(
+      b => pocketedSet.current.has(b.id) && b.label === label
+    );
+    if (pocketedOfType.length === 0) return;
+
+    // Count coins currently on board of this type
+    const MAX_OF_TYPE = label === 'queen' ? 1 : 9;
+    const onBoard = coinBodiesRef.current.filter(
+      b => !pocketedSet.current.has(b.id) && b.label === label && b.id !== (strikerRef.current?.id ?? -1)
+    ).length;
+    if (onBoard >= MAX_OF_TYPE) return; // already at max, no need to return
+
+    // Un-pocket one coin of this type (reuse existing body to avoid ID issues)
+    const toReturn = pocketedOfType[0];
+    pocketedSet.current.delete(toReturn.id);
+
     const offsetX = (Math.random() - 0.5) * COIN_R * 3;
     const offsetY = (Math.random() - 0.5) * COIN_R * 3;
-    const penalty = Matter.Bodies.circle(BW/2 + offsetX, BH/2 + offsetY, COIN_R, {
-      restitution: 0.72, friction: 0.04, frictionAir: 0.016, density: 0.002, label,
-    });
-    coinBodiesRef.current.push(penalty);
-    Matter.Composite.add(engineRef.current.world, penalty);
+    // Place near center
+    Matter.Body.setPosition(toReturn, { x: BW/2 + offsetX, y: BH/2 + offsetY });
+    Matter.Body.setVelocity(toReturn, { x: 0, y: 0 });
+    Matter.Body.setAngularVelocity(toReturn, 0);
+    // Re-add to world (it was removed earlier)
+    try { Matter.Composite.add(engineRef.current.world, toReturn); } catch (_) {}
   }
 
   // ─────────────────────────────────────────
@@ -880,9 +899,18 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
       extraTurnRef.current = false; // foul cancels extra turn
       playSound('foul');
       showFoul('⚠️ FOUL — Striker pocket hua! Ek coin wapas aayega.');
-      // Penalty: one previously pocketed own coin returns
-      setTimeout(() => returnCoinToBoard(getPlayerCoinColor(cur, numP)), 400);
-      setTimeout(() => Matter.Composite.remove(engineRef.current!.world, body), 80);
+      // Move striker off-screen but DO NOT remove from world
+      // resetStriker() will bring it back to the lane
+      Matter.Body.setPosition(body, { x: -800, y: -800 });
+      Matter.Body.setVelocity(body, { x: 0, y: 0 });
+      // Penalty: one previously pocketed own coin returns (only if any pocketed)
+      const myColorForPenalty = getPlayerCoinColor(cur, numP);
+      const anyPocketed = coinBodiesRef.current.some(
+        b => pocketedSet.current.has(b.id) && b.label === myColorForPenalty
+      );
+      if (anyPocketed) {
+        setTimeout(() => returnCoinToBoard(myColorForPenalty), 400);
+      }
       return;
     }
 
@@ -900,7 +928,10 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
       setQueenStatus('pocketed');
       setQueenMsg('👑 Queen pocket hua! Usi shot ya agli shot mein apna coin pocket karo.');
       setTimeout(() => setQueenMsg(''), 3500);
-      setTimeout(() => Matter.Composite.remove(engineRef.current!.world, body), 80);
+      setTimeout(() => {
+        Matter.Body.setPosition(body, { x: -900, y: -900 });
+        Matter.Body.setVelocity(body, { x: 0, y: 0 });
+      }, 80);
       return;
     }
 
@@ -929,13 +960,6 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
 
       // In 4P mode, update team coin count: coins are shared between teammates
       // We track per-player coin count, but winning condition checks the team
-      setCoinsLeft(prev => {
-        const next = { ...prev };
-        next[cur] = Math.max(0, next[cur] - 1);
-        coinsLeftRef.current = next;
-        return next;
-      });
-
       // Own coin pocketed → extra turn (unless foul also happened)
       if (!foulThisTurnRef.current) {
         extraTurnRef.current = true;
@@ -966,18 +990,16 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         scoresRef.current = next;
         return next;
       });
-      setCoinsLeft(prev => {
-        const next = { ...prev };
-        next[coinOwner] = Math.max(0, next[coinOwner] - 1);
-        coinsLeftRef.current = next;
-        return next;
-      });
-
       playSound('foul');
       showFoul(`⚠️ FOUL — ${label === 'white' ? '⚪' : '⚫'} Opponent ka coin pocket hua! Turn jaata hai.`);
     }
 
-    setTimeout(() => Matter.Composite.remove(engineRef.current!.world, body), 80);
+    // Move coin off-screen (keep in world so returnCoinToBoard can reuse it)
+    setTimeout(() => {
+      Matter.Body.setPosition(body, { x: -800 - Math.random()*100, y: -800 - Math.random()*100 });
+      Matter.Body.setVelocity(body, { x: 0, y: 0 });
+      Matter.Body.setAngularVelocity(body, 0);
+    }, 80);
   }
 
   // ─────────────────────────────────────────
@@ -1037,10 +1059,16 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
         }
       } else {
         // Cover grace expired — queen returns to center
-        const stillOnBoard = coinBodiesRef.current.find(
-          b => b.label === 'queen' && !pocketedSet.current.has(b.id)
-        );
-        if (!stillOnBoard) {
+        // Return queen: reuse existing pocketed queen body
+        const queenBody = coinBodiesRef.current.find(b => b.label === 'queen');
+        if (queenBody && pocketedSet.current.has(queenBody.id)) {
+          pocketedSet.current.delete(queenBody.id);
+          Matter.Body.setPosition(queenBody, { x: BW/2, y: BH/2 });
+          Matter.Body.setVelocity(queenBody, { x: 0, y: 0 });
+          Matter.Body.setAngularVelocity(queenBody, 0);
+          try { Matter.Composite.add(engineRef.current!.world, queenBody); } catch (_) {}
+        } else if (!queenBody) {
+          // Fallback: create new queen body only if none exists at all
           const q = Matter.Bodies.circle(BW/2, BH/2, COIN_R, {
             restitution: 0.72, friction: 0.04, frictionAir: 0.016, density: 0.002, label: 'queen',
           });
@@ -1125,30 +1153,43 @@ export default function Carrom({ onGameOver, onBack }: CarromProps) {
     pocketedSet.current.delete(strikerRef.current.id);
   }
 
+  // Count coins of a color currently on board (not pocketed, not striker, not off-screen)
+  function countOnBoard(color: string): number {
+    return coinBodiesRef.current.filter(b =>
+      b.label === color &&
+      !pocketedSet.current.has(b.id) &&
+      b.position.x > 0 && b.position.y > 0
+    ).length;
+  }
+
   function checkWin() {
     const active = getActivePlayers();
     const numP = numPlayersRef.current;
 
+    // Sync coinsLeft with actual board state
+    const whiteOnBoard = countOnBoard('white');
+    const blackOnBoard = countOnBoard('black');
+    const newCoinsLeft: CoinsLeft = numP === 4
+      ? { p1: whiteOnBoard, p2: blackOnBoard, p3: whiteOnBoard, p4: blackOnBoard }
+      : { p1: whiteOnBoard, p2: blackOnBoard, p3: 0, p4: 0 };
+    coinsLeftRef.current = newCoinsLeft;
+    setCoinsLeft(newCoinsLeft);
+
     for (const p of active) {
-      if (numP === 4) {
-        // Team win: sum of team coins
-        const team = getTeamPlayers(p, numP);
-        const teamCoins = team.reduce((sum, t) => sum + coinsLeftRef.current[t], 0);
-        if (teamCoins <= 0 && queenCovered.current) {
-          triggerWin(p); return;
-        }
-      } else {
-        if (coinsLeftRef.current[p] <= 0 && queenCovered.current) {
-          triggerWin(p); return;
-        }
+      const myColor = getPlayerCoinColor(p, numP);
+      const myCoinsOnBoard = countOnBoard(myColor);
+      if (myCoinsOnBoard <= 0 && queenCovered.current) {
+        triggerWin(p); return;
       }
       if (scoresRef.current[p] >= 200) {
         triggerWin(p); return;
       }
     }
 
-    const allCoins = coinBodiesRef.current.filter(b => !pocketedSet.current.has(b.id));
-    const nonQueenCoins = allCoins.filter(b => b.label !== 'queen');
+    const nonQueenCoins = coinBodiesRef.current.filter(
+      b => !pocketedSet.current.has(b.id) && b.label !== 'queen'
+        && b.label !== 'striker' && b.position.x > 0
+    );
     if (nonQueenCoins.length === 0 && queenCovered.current) {
       let best = active[0];
       for (const p of active) {
