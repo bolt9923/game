@@ -282,13 +282,14 @@ export default function Carrom({ onGameOver }: CarromProps) {
   const cfR     = useRef<SC>({ p1:0, p2:0, p3:0, p4:0 });
 
   // ── Per-shot flags (reset every shot) ────────────────────────────────────
-  const canShoot   = useRef(true);
-  const inMotion   = useRef(false);
-  const extraTurn  = useRef(false);   // player shoots again
-  const isFoul     = useRef(false);   // foul occurred this turn
-  const strikerIn  = useRef(false);   // striker went into pocket
-  const ownIn      = useRef(false);   // own coin pocketed this shot
-  const oppIn      = useRef(false);   // opp coin pocketed this shot
+  const canShoot        = useRef(true);
+  const inMotion        = useRef(false);
+  const extraTurn       = useRef(false);   // player shoots again
+  const isFoul          = useRef(false);   // foul occurred this turn
+  const strikerIn       = useRef(false);   // striker went into pocket
+  const ownIn           = useRef(false);   // own coin pocketed this shot
+  const oppIn           = useRef(false);   // opp coin pocketed this shot
+  const afterShotPending= useRef(false);   // guard: prevent double afterShot calls
 
   // ── Queen state (persists until resolved) ─────────────────────────────────
   // queenGrace:  0 = queen on board / already covered
@@ -732,7 +733,13 @@ export default function Carrom({ onGameOver }: CarromProps) {
         const v=b.velocity, av=b.angularVelocity;
         return v.x*v.x+v.y*v.y>.01 || Math.abs(av)>.01;
       });
-      if (!moving) { inMotion.current=false; setTimeout(afterShot, 220); }
+      if (!moving) { 
+        if (!afterShotPending.current) {
+          afterShotPending.current = true;
+          inMotion.current = false;
+          setTimeout(afterShot, 220);
+        }
+      }
     });
 
     Matter.Runner.run(run, eng);
@@ -804,17 +811,24 @@ export default function Carrom({ onGameOver }: CarromProps) {
       return;
     }
 
-    // ── OPPONENT COIN (or wrong colour in 4P) ────────────────────
-    // In 4P: same-team colour is also "own", enemy colour is foul
-    // (coinColor already returns 'white'/'black' correctly per team)
+    // ── OPPONENT COIN ─────────────────────────────────────────────
+    // Real carrom rule: opponent ka coin pocket karo →
+    //   • Coin board se HATA JATA HAI (wapas nahi aata)
+    //   • Opponent ko +1 point milta hai
+    //   • Shooter ka turn pass hota hai (foul count nahi)
     if (lbl!==mc) {
       oppIn.current     = true;
-      isFoul.current    = true;
+      isFoul.current    = false;
       extraTurn.current = false;
-      // Return opponent coin immediately
-      setTimeout(() => returnCoin(lbl), 350);
-      beep('foul');
-      showFoul(`⚠️ FOUL — ${lbl==='white'?'⚪':'⚫'} opponent ka coin wapas aayega!`);
+      // Coin already off-board via pocketBody — stays pocketed permanently
+      // Credit +1 to the opponent who owns this coin colour
+      const oppPlayer: Player = n===2
+        ? (mc==='white' ? 'p2' : 'p1')
+        : (lbl==='white' ? 'p1' : 'p2');
+      addScore(oppPlayer, 1);
+      beep('pocket');
+      const oppName = n===2 ? (oppPlayer==='p1'?'Player 1':'Player 2') : PN[oppPlayer];
+      showFoul(`Opponent ka coin gaya — ${oppName} ko +1 point!`);
     }
   }
 
@@ -827,6 +841,7 @@ export default function Carrom({ onGameOver }: CarromProps) {
   //    3. Extra turn OR turn passes
   // ─────────────────────────────────────────────────────────────────────────
   function afterShot() {
+    afterShotPending.current = false;   // guard reset
     const cur=turnR.current, n=numPR.current, mc=coinColor(cur,n);
 
     // ── 1. Striker foul ──────────────────────────────────────────
@@ -838,7 +853,11 @@ export default function Carrom({ onGameOver }: CarromProps) {
       extraTurn.current = false;
     }
 
-    // ── 2. Queen grace resolution ────────────────────────────────
+    // ── 2. Opponent coin foul — coin already returned in handlePocket
+    //    Just ensure extra turn is cancelled (already done in handlePocket)
+    // No additional action needed here
+
+    // ── 3. Queen grace resolution ────────────────────────────────
     if (!qCovered.current && qGrace.current!==0) {
       if (qGrace.current===1) {
         // Queen pocketed THIS shot
@@ -1038,6 +1057,7 @@ export default function Carrom({ onGameOver }: CarromProps) {
     const dx=tx-sx, dy=ty-sy, dist=Math.hypot(dx,dy);
     const pwr=0.38+Math.random()*0.55;
     strikerIn.current=false; ownIn.current=false; oppIn.current=false; isFoul.current=false;
+    afterShotPending.current=false;
     Matter.Body.applyForce(STRIKER.current, STRIKER.current.position, {
       x:(dx/dist)*pwr*MAX_FORCE, y:(dy/dist)*pwr*MAX_FORCE,
     });
@@ -1141,6 +1161,7 @@ export default function Carrom({ onGameOver }: CarromProps) {
 
     canShoot.current=false; inMotion.current=true;
     strikerIn.current=false; ownIn.current=false; oppIn.current=false; isFoul.current=false;
+    afterShotPending.current=false;
 
     Matter.Body.applyForce(STRIKER.current, STRIKER.current.position, {x:fx,y:fy});
     beep('shoot', pwr);
@@ -1202,6 +1223,7 @@ export default function Carrom({ onGameOver }: CarromProps) {
     canShoot.current=true; inMotion.current=false;
     extraTurn.current=false; isFoul.current=false;
     strikerIn.current=false; ownIn.current=false; oppIn.current=false;
+    afterShotPending.current=false;
     qGrace.current=0; qOwner.current=null; qCovered.current=false;
     dragging.current=false; dragPos.current=null; slideR.current=0.5;
     setStatusMsg('Lane tap → position · Drag → aim & shoot');
