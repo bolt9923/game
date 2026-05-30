@@ -756,42 +756,48 @@ export default function Carrom({ onGameOver }: CarromProps) {
   // ─────────────────────────────────────────────────────────────────────────
   function handlePocket(b: Matter.Body) {
     if (POCKETED.current.has(b.id)) return;
-    beep('pocket');
     particles(b.position.x, b.position.y, b.label);
-    pocketBody(b);   // teleport off-screen
+    pocketBody(b);
 
     const lbl = b.label;
     const cur = turnR.current;
     const n   = numPR.current;
-    const mc  = coinColor(cur, n);  // my colour
+    const mc  = coinColor(cur, n);
 
     // ── STRIKER ──────────────────────────────────────────────────
+    // Striker pocket = foul, turn passes, no extra turn
     if (lbl==='striker') {
       strikerIn.current = true;
       isFoul.current    = true;
       extraTurn.current = false;
-      // Don't remove from world; resetStriker will reposition it
       POCKETED.current.delete(b.id);
       Matter.Body.setPosition(b, { x:-900, y:-900 });
       Matter.Body.setVelocity(b, { x:0, y:0 });
+      beep('foul');
+      showFoul('⚠️ Striker pocket! Turn pass.');
       return;
     }
 
     // ── QUEEN ─────────────────────────────────────────────────────
+    // Queen pocket → grace: cover with own coin same shot or next shot
     if (lbl==='queen') {
       if (!qCovered.current) {
-        qGrace.current = 1;  // grace: cover same shot or next
+        qGrace.current = 1;
         qOwner.current = cur;
+        beep('pocket');
         showQueen('👑 Queen pocketed! Apna coin pocket karo — cover karo!');
       }
       return;
     }
 
+    beep('pocket');
+
     // ── OWN COIN ─────────────────────────────────────────────────
+    // Apna coin pocket = +1pt, extra turn
+    // Agar queen grace active hai aur apna coin gaya = queen cover, +3 bonus, extra turn
     if (lbl===mc) {
       ownIn.current = true;
 
-      // Does this cover the queen?
       if (qGrace.current!==0 && !qCovered.current && qOwner.current===cur) {
         qCovered.current = true;
         qGrace.current   = 0;
@@ -799,36 +805,33 @@ export default function Carrom({ onGameOver }: CarromProps) {
         addScore(cur, QUEEN_BONUS);
       }
 
-      // +1 point for own coin
       addScore(cur, 1);
 
-      // Extra turn — only if no foul happened
+      // Extra turn only if no foul this shot
       if (!isFoul.current && !strikerIn.current)
         extraTurn.current = true;
 
-      // Reset consecutive fouls on successful shot
       resetCF(cur);
       return;
     }
 
     // ── OPPONENT COIN ─────────────────────────────────────────────
-    // Real carrom rule: opponent ka coin pocket karo →
-    //   • Coin board se HATA JATA HAI (wapas nahi aata)
-    //   • Opponent ko +1 point milta hai
-    //   • Shooter ka turn pass hota hai (foul count nahi)
+    // Opponent coin pocket:
+    //   • Coin board se permanently hata (wapas nahi aata)
+    //   • Opponent ko +1 point
+    //   • Shooter ka turn pass, extra turn nahi
     if (lbl!==mc) {
       oppIn.current     = true;
-      isFoul.current    = false;
       extraTurn.current = false;
-      // Coin already off-board via pocketBody — stays pocketed permanently
-      // Credit +1 to the opponent who owns this coin colour
+      // isFoul stays as-is (opponent coin is not a foul by itself, just turn passes)
+
       const oppPlayer: Player = n===2
         ? (mc==='white' ? 'p2' : 'p1')
         : (lbl==='white' ? 'p1' : 'p2');
       addScore(oppPlayer, 1);
-      beep('pocket');
-      const oppName = n===2 ? (oppPlayer==='p1'?'Player 1':'Player 2') : PN[oppPlayer];
-      showFoul(`Opponent ka coin gaya — ${oppName} ko +1 point!`);
+
+      const oppName = n===4 ? PN[oppPlayer] : (oppPlayer==='p1' ? 'Player 1' : 'Player 2');
+      showFoul(`${lbl==='white'?'⚪':'⚫'} Opponent ka coin — ${oppName} +1!`);
     }
   }
 
@@ -841,57 +844,55 @@ export default function Carrom({ onGameOver }: CarromProps) {
   //    3. Extra turn OR turn passes
   // ─────────────────────────────────────────────────────────────────────────
   function afterShot() {
-    afterShotPending.current = false;   // guard reset
-    const cur=turnR.current, n=numPR.current, mc=coinColor(cur,n);
+    afterShotPending.current = false;
+    const cur = turnR.current;
+    const n   = numPR.current;
+    const mc  = coinColor(cur, n);
 
-    // ── 1. Striker foul ──────────────────────────────────────────
+    // ── Striker foul: own coin wapas, turn pass ───────────────────
     if (strikerIn.current) {
-      beep('foul');
-      showFoul('⚠️ FOUL — Striker pocket hua! Ek apna coin wapas.');
-      returnCoin(mc);          // penalty: own pocketed coin returns
-      isFoul.current    = true;
+      returnCoin(mc);
       extraTurn.current = false;
+      // isFoul already set in handlePocket
     }
 
-    // ── 2. Opponent coin foul — coin already returned in handlePocket
-    //    Just ensure extra turn is cancelled (already done in handlePocket)
-    // No additional action needed here
-
-    // ── 3. Queen grace resolution ────────────────────────────────
-    if (!qCovered.current && qGrace.current!==0) {
-      if (qGrace.current===1) {
-        // Queen pocketed THIS shot
+    // ── Queen grace resolution ────────────────────────────────────
+    if (!qCovered.current && qGrace.current !== 0) {
+      if (qGrace.current === 1) {
+        // Queen pocketed this shot
         if (ownIn.current && !isFoul.current) {
-          // Covered same shot ✓ (handled in handlePocket already)
+          // Covered same shot — already handled in handlePocket ✓
         } else if (!isFoul.current) {
-          // Not covered, no foul → grant ONE grace shot (player keeps turn)
-          qGrace.current = -1;
+          // Give one grace shot: player keeps turn to cover
+          qGrace.current    = -1;
           extraTurn.current = true;
-          showQueen('👑 Agli shot mein apna coin pocket karo — cover karo!');
+          showQueen('👑 Ek aur chance — apna coin pocket karo!');
         } else {
-          // Foul same shot → queen returns immediately
-          returnQueen();
-          showQueen('👑 Foul ke saath queen — centre mein wapas!');
-        }
-      } else if (qGrace.current===-1) {
-        // This WAS the grace shot
-        if (ownIn.current && !isFoul.current) {
-          // Covered on grace shot ✓ (handled in handlePocket)
-        } else {
-          // Failed cover → queen returns
+          // Foul + queen → queen returns, no grace
           returnQueen();
           extraTurn.current = false;
-          showQueen('👑 Cover nahi hua — queen centre mein wapas!');
+          showQueen('👑 Foul hua — queen centre wapas!');
+        }
+      } else if (qGrace.current === -1) {
+        // This was the grace shot
+        if (ownIn.current && !isFoul.current) {
+          // Covered ✓ already handled
+        } else {
+          // Failed to cover → queen returns
+          returnQueen();
+          extraTurn.current = false;
+          showQueen('👑 Cover nahi hua — queen centre wapas!');
         }
       }
     }
 
-    // Show extra-turn animation
+    // Extra turn animation
     if (extraTurn.current && !isFoul.current) {
-      setExtraAnim(true); setTimeout(()=>setExtraAnim(false), 1100);
+      setExtraAnim(true);
+      setTimeout(() => setExtraAnim(false), 1100);
     }
 
-    // Reset per-shot flags
+    // Reset shot flags
     strikerIn.current = false;
     ownIn.current     = false;
     oppIn.current     = false;
@@ -926,19 +927,20 @@ export default function Carrom({ onGameOver }: CarromProps) {
       extraTurn.current = false;
     }
 
+    // extraTurn true = same player shoots again (apna coin ya queen cover)
+    // extraTurn false = next player ka turn
     if (extraTurn.current) {
-      // Same player shoots again
       extraTurn.current = false;
+      // same player — striker reset on their lane
     } else {
-      // Pass to next player
       const nxt = nextPlayer(turnR.current, numPR.current);
-      setTurn(nxt); turnR.current = nxt;
+      setTurn(nxt);
+      turnR.current = nxt;
     }
 
     resetStriker();
     canShoot.current = true;
 
-    // Online sync
     if (modeR.current==='online_playing' && roomR.current) {
       mockBackend.publish(('carrom_sync_'+roomR.current) as any, {
         type:'sync', turn:turnR.current, scores:scR.current,
